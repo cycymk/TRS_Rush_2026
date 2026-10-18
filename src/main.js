@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { HackGame } from './hack.js';
 import { sfx, initAudio, vibrate } from './audio.js';
 import { Records, Prefs } from './storage.js';
+import { QUALITY, createPost, buildEnvironment, makeRockTextures, shieldMaterial } from './graphics.js';
 
 const $ = (id) => document.getElementById(id);
 const rand = (a, b) => a + Math.random() * (b - a);
@@ -48,26 +49,42 @@ const SENS = [0.5, 0.36, 0.26];   // 陀螺儀滿偏需要的傾斜角（弧度�
 /* ================= 畫面基礎 ================= */
 const canvas = $('c');
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance' });
-renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+renderer.toneMapping = THREE.ACESFilmicToneMapping;   // 電影感色調（Unreal 預設也是 ACES）
+renderer.toneMappingExposure = 1.05;
 const scene = new THREE.Scene();
 scene.fog = new THREE.Fog(0x8866ff, 110, 330);
 const camera = new THREE.PerspectiveCamera(72, 1, 0.1, 700);
 camera.position.set(0, 1.3, 7.5);
-scene.add(new THREE.HemisphereLight(0xc8b8ff, 0x180830, 1.3));
-const sun = new THREE.DirectionalLight(0xffffff, 1.6);
+scene.add(new THREE.HemisphereLight(0xc8b8ff, 0x180830, 0.5));
+const sun = new THREE.DirectionalLight(0xfff2e0, 2.2);
 sun.position.set(4, 6, 8);
 scene.add(sun);
-const shipLight = new THREE.PointLight(0x66ccff, 25, 25, 2);
+const rim = new THREE.DirectionalLight(0x88aaff, 1.6);   // 背光，勾出物體輪廓
+rim.position.set(-3, -2, -10);
+scene.add(rim);
+const shipLight = new THREE.PointLight(0x66ccff, 6, 25, 2);
 scene.add(shipLight);
+// 爆炸閃光用的動態光源（固定數量，避免材質重新編譯）
+const boomLights = Array.from({ length: 3 }, () => { const l = new THREE.PointLight(0xffaa55, 0, 40, 2); scene.add(l); return l; });
+let boomIdx = 0;
 
+const post = createPost(renderer, scene, camera);
+const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent) || (navigator.maxTouchPoints > 1 && window.innerWidth < 1100);
+let dynScale = 1;     // 自動降解析度（掉幀時）
+let quality = 2;
 function resize() {
-  const w = window.innerWidth, h = window.innerHeight;
+  // 泛光會把畫面一路縮小 5 次，尺寸太小（例如視窗被隱藏時）會產生空的緩衝區
+  const w = Math.max(64, window.innerWidth), h = Math.max(64, window.innerHeight);
+  const pr = Math.min(window.devicePixelRatio || 1, QUALITY[quality].maxDpr) * dynScale;
+  renderer.setPixelRatio(pr);
   renderer.setSize(w, h, false);
+  post.composer.setPixelRatio(pr);
+  post.composer.setSize(w, h);
+  post.lens.uniforms.uAspect.value = w / h;
   camera.aspect = w / h;
   camera.updateProjectionMatrix();
 }
 window.addEventListener('resize', resize);
-resize();
 
 function glowTexture() {
   const c = document.createElement('canvas');
@@ -84,11 +101,16 @@ function glowTexture() {
   return t;
 }
 const glowTex = glowTexture();
-const additive = (color, opacity = 1, extra = {}) => new THREE.MeshBasicMaterial({
-  color, transparent: true, opacity, blending: THREE.AdditiveBlending, depthWrite: false, fog: false, ...extra,
-});
-function glowSprite(color, scale) {
-  const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: glowTex, color, blending: THREE.AdditiveBlending, depthWrite: false, transparent: true, fog: false }));
+// 發光材質：intensity > 1 代表超過一般亮度（HDR），會被泛光後製抓到而發出光暈
+const hdr = (color, intensity) => new THREE.Color(color).multiplyScalar(intensity);
+const additive = (color, opacity = 1, extra = {}, intensity = 1) => {
+  const { intensity: _i, ...rest } = extra;
+  return new THREE.MeshBasicMaterial({
+    color: hdr(color, _i ?? intensity), transparent: true, opacity, blending: THREE.AdditiveBlending, depthWrite: false, fog: false, toneMapped: true, ...rest,
+  });
+};
+function glowSprite(color, scale, intensity = 2) {
+  const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: glowTex, color: hdr(color, intensity), blending: THREE.AdditiveBlending, depthWrite: false, transparent: true, fog: false }));
   s.scale.setScalar(scale);
   return s;
 }
@@ -135,39 +157,60 @@ const tunnel = new THREE.Mesh(tunnelGeo, new THREE.ShaderMaterial({
     uniform float uTime, uTravel, uWarp, uLen, uHit;
     uniform vec3 uColA, uColB;
     varying vec2 vUv; varying float vZ;
+    float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+    float noise(vec2 p) {
+      vec2 i = floor(p), f = fract(p);
+      f = f * f * (3.0 - 2.0 * f);
+      return mix(mix(hash(i), hash(i + vec2(1.0, 0.0)), f.x), mix(hash(i + vec2(0.0, 1.0)), hash(i + vec2(1.0, 1.0)), f.x), f.y);
+    }
+    float fbm(vec2 p) { float v = 0.0, a = 0.5; for (int i = 0; i < 4; i++) { v += a * noise(p); p *= 2.03; a *= 0.5; } return v; }
     void main() {
       float a = vUv.x * 6.2831853;
       float s = (vZ - uTravel) * 0.035 * (1.0 - 0.6 * uWarp);
       float spiral = smoothstep(0.55, 1.0, sin(a * 5.0 + s * 1.7 + uTime * 0.5));
       float rings = pow(0.5 + 0.5 * sin(s * 5.0), 24.0);
-      float grid = pow(0.5 + 0.5 * sin(a * 30.0), 30.0) * 0.6;
+      float grid = pow(0.5 + 0.5 * sin(a * 30.0), 30.0);
       float cells = 0.5 + 0.5 * sin(a * 3.0 - s * 0.9 + uTime * 0.3);
-      vec3 col = mix(uColA, uColB, cells);
-      col *= 0.18 + spiral * 0.75 + rings * 0.9 + grid;
+      // 流動的電漿與能量絲（左右鏡像取樣，圓周接縫處不會斷開）
+      float ax = abs(vUv.x - 0.5) * 14.0;
+      float n = fbm(vec2(ax + sin(s * 0.3) * 0.8, s * 1.3 - uTime * 0.6));
+      float plasma = smoothstep(0.42, 0.85, n);
+      float fil = pow(1.0 - abs(n * 2.0 - 1.0), 14.0);
+      vec3 base = mix(uColA, uColB, cells);
+      vec3 col = base * (0.035 + plasma * 0.32 + spiral * 0.22 + grid * 0.12);
+      col += base * rings * 1.5;
+      col += mix(base, vec3(1.0), 0.3) * fil * 0.9;
       float streak = pow(0.5 + 0.5 * sin(a * 48.0 + floor(s * 0.25) * 13.0), 40.0);
-      col += vec3(0.75, 0.9, 1.0) * streak * uWarp * 2.5;
-      col = mix(col, vec3(1.0), uWarp * 0.18);
+      col += vec3(0.75, 0.9, 1.0) * streak * uWarp * 0.9;
+      // 隧道盡頭的強光（亮度超過 1，會在泛光下形成光暈）
       float far = clamp(-vZ / (uLen - 60.0), 0.0, 1.0);
-      col = mix(col, uColB * 1.3 + 0.35, pow(far, 2.2) * 0.95);
-      col += vec3(1.0, 0.1, 0.2) * uHit * 0.6;
+      col = mix(col, (uColB * 0.6 + 0.4) * 2.4, pow(far, 2.6) * 0.97);
+      col += vec3(1.0, 0.1, 0.2) * uHit * 0.8;
       gl_FragColor = vec4(col, 1.0);
+      #include <tonemapping_fragment>
       #include <colorspace_fragment>
     }`,
 }));
 tunnel.frustumCulled = false;
 scene.add(tunnel);
 
+let envRT = null;
 function setPalette(i) {
   const [a, b] = PALETTES[i % PALETTES.length];
-  tunnelUniforms.uColA.value.setHex(a);
-  tunnelUniforms.uColB.value.setHex(b);
-  scene.fog.color.copy(tunnelUniforms.uColB.value).multiplyScalar(1.3).addScalar(0.35);
+  const A = tunnelUniforms.uColA.value.setHex(a), B = tunnelUniforms.uColB.value.setHex(b);
+  scene.fog.color.copy(B).multiplyScalar(0.6).addScalar(0.4).multiplyScalar(1.1);
+  // 依配色重新產生反射環境
+  const old = envRT;
+  envRT = buildEnvironment(renderer, A, B);
+  scene.environment = envRT.texture;
+  old?.dispose();
 }
 setPalette(0);
 
 /* ================= 光速流線 ================= */
 const STREAKS = 260;
-const streakMesh = new THREE.InstancedMesh(new THREE.BoxGeometry(0.06, 0.06, 1), additive(0xffffff, 0.7), STREAKS);
+const streakMat = additive(0xffffff, 0.7, {}, 1.6);
+const streakMesh = new THREE.InstancedMesh(new THREE.BoxGeometry(0.06, 0.06, 1), streakMat, STREAKS);
 streakMesh.frustumCulled = false;
 scene.add(streakMesh);
 const streaks = Array.from({ length: STREAKS }, () => ({ a: rand(0, TAU), r: rand(2.5, 10.5), z: rand(SPAWN_Z, 10) }));
@@ -176,35 +219,61 @@ const dummy = new THREE.Object3D();
 /* ================= 玩家飛船 ================= */
 function buildShip() {
   const group = new THREE.Group();
-  const hullMat = new THREE.MeshStandardMaterial({ color: 0xdfe6ff, metalness: 0.6, roughness: 0.3, flatShading: true });
-  const accentMat = new THREE.MeshStandardMaterial({ color: 0x111122, emissive: 0x7fd8ff, emissiveIntensity: 2 });
-  const body = new THREE.Mesh(new THREE.ConeGeometry(0.55, 2.6, 6), hullMat);
+  // 烤漆金屬：清漆層＋高金屬度，會映出隧道的光
+  const hullMat = new THREE.MeshPhysicalMaterial({ color: 0x9aa3b8, metalness: 0.85, roughness: 0.3, clearcoat: 1, clearcoatRoughness: 0.1, envMapIntensity: 0.55 });
+  const darkMat = new THREE.MeshPhysicalMaterial({ color: 0x23283a, metalness: 0.9, roughness: 0.35, clearcoat: 0.6, envMapIntensity: 0.6 });
+  const accentMat = new THREE.MeshStandardMaterial({ color: 0x111122, emissive: 0x7fd8ff, emissiveIntensity: 3.5 });
+  const glassMat = new THREE.MeshPhysicalMaterial({ color: 0x0a1830, metalness: 0.2, roughness: 0.02, clearcoat: 1, emissive: 0x1a4a80, emissiveIntensity: 0.6 });
+
+  const body = new THREE.Mesh(new THREE.ConeGeometry(0.55, 2.8, 8), hullMat);
   body.rotation.x = -Math.PI / 2;
+  body.scale.set(1, 1, 0.75);
   group.add(body);
-  const wing = new THREE.Mesh(new THREE.BoxGeometry(3.0, 0.07, 0.9), hullMat);
-  wing.position.set(0, -0.05, 0.5);
-  group.add(wing);
+  const spine = new THREE.Mesh(new THREE.BoxGeometry(0.28, 0.22, 1.9), darkMat);
+  spine.position.set(0, 0.28, 0.35);
+  group.add(spine);
+  // 後掠翼
+  const wingShape = new THREE.Shape();
+  wingShape.moveTo(0.2, -0.3); wingShape.lineTo(1.8, 0.55); wingShape.lineTo(1.85, 0.95); wingShape.lineTo(0.25, 0.95); wingShape.closePath();
+  const wingGeo = new THREE.ExtrudeGeometry(wingShape, { depth: 0.07, bevelEnabled: true, bevelThickness: 0.02, bevelSize: 0.03, bevelSegments: 1 });
+  wingGeo.rotateX(Math.PI / 2);
   for (const sx of [-1, 1]) {
-    const tip = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.35, 1.1), accentMat);
-    tip.position.set(sx * 1.5, 0.05, 0.45);
+    const wing = new THREE.Mesh(wingGeo, hullMat);
+    wing.scale.x = sx;
+    wing.position.set(0, -0.02, 0.05);
+    group.add(wing);
+    const stripe = new THREE.Mesh(new THREE.BoxGeometry(1.2, 0.02, 0.06), accentMat);
+    stripe.position.set(sx * 1.05, 0.06, 0.62);
+    stripe.rotation.y = sx * -0.48;
+    group.add(stripe);
+    const tip = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.32, 0.7), accentMat);
+    tip.position.set(sx * 1.83, 0.08, 0.72);
     group.add(tip);
-    const fin = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.55, 0.7), hullMat);
-    fin.position.set(sx * 0.45, 0.3, 0.9);
-    fin.rotation.z = sx * -0.35;
+    const fin = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.6, 0.75), darkMat);
+    fin.position.set(sx * 0.42, 0.38, 0.95);
+    fin.rotation.z = sx * -0.38;
     group.add(fin);
+    // 引擎噴嘴
+    const nozzle = new THREE.Mesh(new THREE.CylinderGeometry(0.2, 0.26, 0.55, 12, 1, true), darkMat);
+    nozzle.rotation.x = Math.PI / 2;
+    nozzle.position.set(sx * 0.32, -0.02, 1.25);
+    group.add(nozzle);
+    const core = new THREE.Mesh(new THREE.CircleGeometry(0.19, 12), additive(0x9fe8ff, 1, {}, 1.4));
+    core.position.set(sx * 0.32, -0.02, 1.5);
+    group.add(core);
   }
-  const cockpit = new THREE.Mesh(new THREE.SphereGeometry(0.3, 12, 8), accentMat);
-  cockpit.scale.set(1, 0.7, 1.8);
-  cockpit.position.set(0, 0.25, -0.25);
+  const cockpit = new THREE.Mesh(new THREE.SphereGeometry(0.3, 16, 10), glassMat);
+  cockpit.scale.set(1, 0.7, 1.9);
+  cockpit.position.set(0, 0.24, -0.35);
   group.add(cockpit);
-  const flame = new THREE.Mesh(new THREE.ConeGeometry(0.32, 1.6, 10, 1, true), additive(0x66ddff, 0.85));
+  const flame = new THREE.Mesh(new THREE.ConeGeometry(0.32, 1.6, 12, 1, true), additive(0x66ddff, 0.5, {}, 1.0));
   flame.rotation.x = Math.PI / 2;
-  flame.position.z = 2.1;
+  flame.position.z = 2.2;
   group.add(flame);
-  const glow = glowSprite(0x66ddff, 1.1);
-  glow.position.z = 1.4;
+  const glow = glowSprite(0x66ddff, 0.7, 0.6);
+  glow.position.z = 1.6;
   group.add(glow);
-  const bubble = new THREE.Mesh(new THREE.IcosahedronGeometry(1.9, 1), additive(0x66ffcc, 0.25, { wireframe: true }));
+  const bubble = new THREE.Mesh(new THREE.IcosahedronGeometry(1.9, 1), additive(0x66ffcc, 0.25, { wireframe: true }, 2));
   bubble.visible = false;
   group.add(bubble);
   scene.add(group);
@@ -213,9 +282,49 @@ function buildShip() {
 const shipModel = buildShip();
 const ship = { x: 0, y: 0, vx: 0, vy: 0, zOff: 0 };
 
+/* ================= 引擎尾跡 ================= */
+const TRAIL_N = 30;
+function makeTrail(color, width, intensity) {
+  const geo = new THREE.BufferGeometry();
+  const pos = new Float32Array(TRAIL_N * 2 * 3), col = new Float32Array(TRAIL_N * 2 * 3), idx = [];
+  for (let i = 0; i < TRAIL_N - 1; i++) { const a = i * 2; idx.push(a, a + 1, a + 2, a + 1, a + 3, a + 2); }
+  geo.setIndex(idx);
+  geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  geo.setAttribute('color', new THREE.BufferAttribute(col, 3));
+  const mesh = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ vertexColors: true, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide, fog: false }));
+  mesh.frustumCulled = false;
+  scene.add(mesh);
+  return { mesh, geo, pts: Array.from({ length: TRAIL_N }, () => new THREE.Vector3(0, 0, 50)), color: hdr(color, intensity), width, anchor: new THREE.Vector3() };
+}
+const trails = [
+  Object.assign(makeTrail(0x66ccff, 0.07, 0.7), { local: new THREE.Vector3(-0.32, -0.02, 1.5) }),
+  Object.assign(makeTrail(0x66ccff, 0.07, 0.7), { local: new THREE.Vector3(0.32, -0.02, 1.5) }),
+  Object.assign(makeTrail(0xffffff, 0.025, 0.8), { local: new THREE.Vector3(-1.83, 0.08, 1.0) }),
+  Object.assign(makeTrail(0xffffff, 0.025, 0.8), { local: new THREE.Vector3(1.83, 0.08, 1.0) }),
+];
+function updateTrails(dt, speed) {
+  const on = shipModel.group.visible;
+  shipModel.group.updateMatrixWorld();
+  for (const t of trails) {
+    t.mesh.visible = on;
+    const p = t.pts;
+    for (let i = TRAIL_N - 1; i > 0; i--) p[i].copy(p[i - 1]).setZ(Math.min(4.5, p[i - 1].z + speed * dt * 0.09));
+    p[0].copy(t.local).applyMatrix4(shipModel.group.matrixWorld);
+    const pos = t.geo.attributes.position.array, col = t.geo.attributes.color.array;
+    const w = t.width * (1 + (S.speedMul - 1) * 0.6);
+    for (let i = 0; i < TRAIL_N; i++) {
+      const f = 1 - i / (TRAIL_N - 1), ww = w * (0.3 + 0.7 * f), k = f * f * clamp((4.5 - p[i].z) / 2, 0, 1);
+      pos.set([p[i].x - ww, p[i].y, p[i].z, p[i].x + ww, p[i].y, p[i].z], i * 6);
+      col.set([t.color.r * k, t.color.g * k, t.color.b * k, t.color.r * k, t.color.g * k, t.color.b * k], i * 6);
+    }
+    t.geo.attributes.position.needsUpdate = true;
+    t.geo.attributes.color.needsUpdate = true;
+  }
+}
+
 /* ================= 共用幾何與材質 ================= */
 function rockGeo(seed) {
-  const g = new THREE.IcosahedronGeometry(1, 1);
+  const g = new THREE.IcosahedronGeometry(1, 3);
   const p = g.attributes.position, v = new THREE.Vector3();
   for (let i = 0; i < p.count; i++) {
     v.fromBufferAttribute(p, i);
@@ -228,22 +337,28 @@ function rockGeo(seed) {
   return g;
 }
 const ROCK_GEOS = [1.3, 2.9, 4.4, 7.7].map(rockGeo);
-const rockMat = new THREE.MeshStandardMaterial({ color: 0x8a7c74, roughness: 0.9, metalness: 0.1, flatShading: true });
-const wallMat = new THREE.MeshStandardMaterial({ color: 0x5a5470, roughness: 0.8, metalness: 0.3, flatShading: true, emissive: 0x221133 });
-const crystalMat = new THREE.MeshStandardMaterial({ color: 0x66ffee, roughness: 0.2, metalness: 0.5, flatShading: true, emissive: 0x119988, emissiveIntensity: 1.2 });
+// 隕石材質：程式生成的顏色／凹凸／粗糙度貼圖；大隕石帶發光的岩漿裂縫
+const rockTex = makeRockTextures(256);
+const rockMat = new THREE.MeshStandardMaterial({ map: rockTex.albedo, bumpMap: rockTex.bump, bumpScale: 4, roughnessMap: rockTex.rough, roughness: 1, metalness: 0.05, color: 0xc8b8ac });
+const magmaMat = new THREE.MeshStandardMaterial({
+  map: rockTex.albedo, bumpMap: rockTex.bump, bumpScale: 5, roughnessMap: rockTex.rough, roughness: 1, metalness: 0.1, color: 0x6a5c56,
+  emissiveMap: rockTex.magma, emissive: 0xff5a1a, emissiveIntensity: 3.2,
+});
+const wallMat = new THREE.MeshStandardMaterial({ map: rockTex.albedo, bumpMap: rockTex.bump, bumpScale: 3, roughnessMap: rockTex.rough, roughness: 0.8, metalness: 0.5, color: 0x7a74a0, emissive: 0x2a1450, emissiveIntensity: 0.6 });
+const crystalMat = new THREE.MeshPhysicalMaterial({ color: 0x66ffee, roughness: 0.06, metalness: 0.2, flatShading: true, clearcoat: 1, iridescence: 1, iridescenceIOR: 1.7, emissive: 0x10a090, emissiveIntensity: 1.6 });
 
-const shotGeoBig = new THREE.BoxGeometry(0.22, 0.22, 1.8);
-const shotGeoSmall = new THREE.BoxGeometry(0.12, 0.12, 1.3);
-const shotMats = Object.fromEntries(WEAPON_KEYS.map((k) => [k, additive(WEAPONS[k].color)]));
-const eshotGeo = new THREE.SphereGeometry(0.65, 10, 8);
-const eshotMat = additive(0xff3366);
+const shotGeoBig = new THREE.CapsuleGeometry(0.13, 1.6, 2, 8).rotateX(Math.PI / 2);
+const shotGeoSmall = new THREE.CapsuleGeometry(0.07, 1.2, 2, 6).rotateX(Math.PI / 2);
+const shotMats = Object.fromEntries(WEAPON_KEYS.map((k) => [k, additive(WEAPONS[k].color, 1, {}, 5)]));
+const eshotGeo = new THREE.SphereGeometry(0.65, 14, 10);
+const eshotMat = additive(0xff3366, 1, {}, 4);
 const droneGeo = new THREE.OctahedronGeometry(0.9);
-const droneMat = new THREE.MeshStandardMaterial({ color: 0x224422, emissive: 0x7dff9a, emissiveIntensity: 1.5, flatShading: true });
+const droneMat = new THREE.MeshPhysicalMaterial({ color: 0x1a2a1e, metalness: 0.9, roughness: 0.25, emissive: 0x7dff9a, emissiveIntensity: 2.5, flatShading: true, clearcoat: 1 });
 const boostOrbGeo = new THREE.OctahedronGeometry(0.8);
-const boostOrbMat = new THREE.MeshStandardMaterial({ color: 0x113344, emissive: 0x44e8ff, emissiveIntensity: 2.2, flatShading: true });
-const repairOrbMat = new THREE.MeshStandardMaterial({ color: 0x113322, emissive: 0x66ff88, emissiveIntensity: 2.2, flatShading: true });
-const ringGeo = new THREE.TorusGeometry(2.3, 0.16, 8, 40);
-const ringMat = additive(0xffd166, 0.95);
+const boostOrbMat = new THREE.MeshPhysicalMaterial({ color: 0x113344, emissive: 0x44e8ff, emissiveIntensity: 3.5, flatShading: true, clearcoat: 1, metalness: 0.5, roughness: 0.1 });
+const repairOrbMat = new THREE.MeshPhysicalMaterial({ color: 0x113322, emissive: 0x66ff88, emissiveIntensity: 3.5, flatShading: true, clearcoat: 1, metalness: 0.5, roughness: 0.1 });
+const ringGeo = new THREE.TorusGeometry(2.3, 0.16, 12, 48);
+const ringMat = additive(0xffd166, 0.95, {}, 4);
 
 /* ================= 物件容器 ================= */
 const rocks = [], shots = [], eshots = [], pickups = [], rings = [], drones = [], fxs = [];
@@ -271,15 +386,37 @@ function spawnBurst(x, y, z, color, count = 24, spd = 12, size = 0.9, life = 0.7
     vel[i * 3] = Math.cos(th) * s * m; vel[i * 3 + 1] = Math.sin(th) * s * m; vel[i * 3 + 2] = u * m;
   }
   geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
-  const mat = new THREE.PointsMaterial({ color, size, map: glowTex, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, fog: false });
+  const mat = new THREE.PointsMaterial({ color: hdr(color, 3), size, map: glowTex, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, fog: false });
   const mesh = new THREE.Points(geo, mat);
   mesh.frustumCulled = false;
   scene.add(mesh);
-  fxs.push({ mesh, geo, mat, vel, x, y, z, life, max: life, fixed });
+  fxs.push({ kind: 'points', mesh, geo, mat, vel, x, y, z, life, max: life, fixed });
+}
+// 大爆炸：粒子＋擴散衝擊波＋飛散碎石＋一瞬間照亮周圍的閃光
+const shockGeo = new THREE.RingGeometry(0.85, 1, 48);
+function spawnExplosion(x, y, z, color, scale = 1, fixed = false) {
+  spawnBurst(x, y, z, color, Math.round(36 * scale), 14 * scale, 1.2 * scale, 0.8, fixed);
+  spawnBurst(x, y, z, 0xffffff, Math.round(14 * scale), 6 * scale, 2.2 * scale, 0.35, fixed);
+  const mat = additive(color, 1, { side: THREE.DoubleSide }, 4);
+  const ring = new THREE.Mesh(shockGeo, mat);
+  scene.add(ring);
+  fxs.push({ kind: 'ring', mesh: ring, mat, x, y, z, life: 0.55, max: 0.55, fixed, scale: scale * 9 });
+  for (let i = 0; i < Math.round(5 * scale); i++) {
+    const m = new THREE.Mesh(pick(ROCK_GEOS), rockMat);
+    const s = rand(0.15, 0.4) * scale;
+    m.scale.setScalar(s);
+    scene.add(m);
+    fxs.push({ kind: 'debris', mesh: m, x, y, z, life: rand(0.6, 1.1), max: 1, fixed, s,
+      vx: rand(-1, 1) * 14 * scale, vy: rand(-1, 1) * 14 * scale, vz: rand(-1, 1) * 10 * scale, rx: rand(-8, 8), ry: rand(-8, 8) });
+  }
+  const l = boomLights[boomIdx++ % boomLights.length];
+  l.color.setHex(color);
+  l.userData = { life: 0.35, max: 0.35, peak: 260 * scale, x, y, z, fixed };
 }
 function removeFx(i) {
   const f = fxs[i];
-  f.geo.dispose(); f.mat.dispose();
+  if (f.geo) f.geo.dispose();
+  if (f.mat) f.mat.dispose();
   removeAt(fxs, i);
 }
 function updateFx(dt, speed) {
@@ -287,12 +424,31 @@ function updateFx(dt, speed) {
     const f = fxs[i];
     f.life -= dt;
     if (f.life <= 0) { removeFx(i); continue; }
-    const p = f.geo.attributes.position.array, drag = Math.pow(0.05, dt);
-    for (let j = 0; j < p.length; j++) { p[j] += f.vel[j] * dt; f.vel[j] *= drag; }
-    f.geo.attributes.position.needsUpdate = true;
-    f.mat.opacity = f.life / f.max;
+    const k = f.life / f.max;
+    if (f.kind === 'points') {
+      const p = f.geo.attributes.position.array, drag = Math.pow(0.05, dt);
+      for (let j = 0; j < p.length; j++) { p[j] += f.vel[j] * dt; f.vel[j] *= drag; }
+      f.geo.attributes.position.needsUpdate = true;
+      f.mat.opacity = k;
+    } else if (f.kind === 'ring') {
+      f.mesh.scale.setScalar(f.scale * (1 - k * k) + 0.5);
+      f.mat.opacity = k * k;
+    } else if (f.kind === 'debris') {
+      f.x += f.vx * dt; f.y += f.vy * dt; f.z += f.vz * dt;
+      f.mesh.rotation.x += f.rx * dt; f.mesh.rotation.y += f.ry * dt;
+      f.mesh.scale.setScalar(f.s * Math.min(1, k * 2));
+    }
     if (!f.fixed) f.z += speed * dt;
     place(f);
+  }
+  for (const l of boomLights) {
+    const u = l.userData;
+    if (!u || !u.life) { l.intensity = 0; continue; }
+    u.life = Math.max(0, u.life - dt);
+    if (!u.fixed) u.z += speed * dt;
+    const b = bendAt(u.z);
+    l.position.set(u.x + b.x, u.y + b.y, u.z);
+    l.intensity = u.peak * (u.life / u.max) ** 2;
   }
 }
 
@@ -538,8 +694,8 @@ function fireWeapon(dt, speed) {
 const LASER_SEGS = 14;
 const laserGeo = new THREE.CylinderGeometry(0.17, 0.17, 1, 8, 1, true);
 laserGeo.rotateX(Math.PI / 2);
-const laserMat = additive(0xff5ce1, 0.9);
-const laserCoreMat = additive(0xffffff, 0.9);
+const laserMat = additive(0xff5ce1, 0.9, {}, 5);
+const laserCoreMat = additive(0xffffff, 0.9, {}, 4);
 const laserSegs = [];
 for (let i = 0; i < LASER_SEGS; i++) {
   const m = new THREE.Mesh(laserGeo, laserMat);
@@ -551,7 +707,7 @@ for (let i = 0; i < LASER_SEGS; i++) {
   scene.add(m);
   laserSegs.push(m);
 }
-const laserHit = glowSprite(0xff9cf0, 3);
+const laserHit = glowSprite(0xff9cf0, 3, 4);
 laserHit.visible = false;
 scene.add(laserHit);
 const segA = new THREE.Vector3(), segB = new THREE.Vector3();
@@ -599,7 +755,7 @@ function laserUpdate(dt, def, lv) {
 
 /* ================= 生成：隕石 / 道具 / 加速環 ================= */
 function makeRock(o) {
-  const mesh = new THREE.Mesh(pick(ROCK_GEOS), o.kind === 'crystal' ? crystalMat : o.kind === 'wall' ? wallMat : rockMat);
+  const mesh = new THREE.Mesh(pick(ROCK_GEOS), o.kind === 'crystal' ? crystalMat : o.kind === 'wall' ? wallMat : o.kind === 'big' ? magmaMat : rockMat);
   mesh.scale.setScalar(o.r);
   mesh.rotation.set(rand(0, TAU), rand(0, TAU), 0);
   scene.add(mesh);
@@ -675,7 +831,7 @@ function damageRock(i, dmg) {
 function destroyRock(i, byPlayer) {
   const r = rocks[i];
   const col = r.kind === 'crystal' ? 0x66ffee : 0xffb070;
-  spawnBurst(r.x, r.y, r.z, col, r.kind === 'big' ? 40 : 20, r.kind === 'big' ? 16 : 10, r.kind === 'big' ? 1.3 : 0.9);
+  spawnExplosion(r.x, r.y, r.z, r.kind === 'big' ? 0xff7a30 : col, r.kind === 'big' ? 1 : r.kind === 'wall' ? 0.4 : 0.55);
   sfx.boom(r.kind === 'big');
   if (byPlayer) {
     S.kills++; S.roundKills++;
@@ -695,7 +851,7 @@ function damageDrone(i, dmg) {
   const d = drones[i];
   d.hp -= dmg;
   if (d.hp <= 0) {
-    spawnBurst(d.x, d.y, d.z, 0x7dff9a, 22, 12, 1, 0.6, true);
+    spawnExplosion(d.x, d.y, d.z, 0x7dff9a, 0.6, true);
     sfx.boom(false);
     addScore(150); S.credits += 15; S.kills++; S.roundKills++;
     removeAt(drones, i);
@@ -798,10 +954,10 @@ function endWave() {
 function spawnGate(type) {
   const col = type === 'choice' ? 0x66f0ff : 0xff66d9;
   const g = new THREE.Group();
-  const mat = additive(col, 1);
+  const mat = additive(col, 1, {}, 4);
   const ring2 = new THREE.Mesh(new THREE.TorusGeometry(8.8, 0.08, 6, 6), mat);
   g.add(new THREE.Mesh(new THREE.TorusGeometry(9.6, 0.35, 8, 72), mat), ring2);
-  g.add(new THREE.Mesh(new THREE.CircleGeometry(9.5, 48), additive(col, 0.12, { side: THREE.DoubleSide })));
+  g.add(new THREE.Mesh(new THREE.CircleGeometry(9.5, 48), additive(col, 0.12, { side: THREE.DoubleSide }, 1.5)));
   scene.add(g);
   gate = { mesh: g, x: 0, y: 0, z: -300, type, ring2 };
 }
@@ -859,10 +1015,10 @@ function showChoice() {
 /* ================= BOSS ================= */
 function createBoss() {
   const g = new THREE.Group();
-  const coreMat = new THREE.MeshStandardMaterial({ color: 0x2a2a3a, metalness: 0.7, roughness: 0.3, emissive: 0xff3355, emissiveIntensity: 0.5, flatShading: true });
+  const coreMat = new THREE.MeshPhysicalMaterial({ color: 0x1a1a26, metalness: 0.9, roughness: 0.2, clearcoat: 1, emissive: 0xff3355, emissiveIntensity: 0.8, flatShading: true });
   const core = new THREE.Mesh(new THREE.IcosahedronGeometry(3, 0), coreMat);
   g.add(core);
-  const armorMat = new THREE.MeshStandardMaterial({ color: 0x9aa3c0, metalness: 0.85, roughness: 0.35, flatShading: true });
+  const armorMat = new THREE.MeshPhysicalMaterial({ color: 0xb4bccf, metalness: 0.95, roughness: 0.28, clearcoat: 0.8, clearcoatRoughness: 0.15, flatShading: true });
   const ringA = new THREE.Mesh(new THREE.TorusGeometry(4.6, 0.5, 6, 20), armorMat);
   const ringB = new THREE.Mesh(new THREE.TorusGeometry(5.6, 0.22, 4, 36), armorMat);
   ringB.rotation.x = Math.PI / 2;
@@ -874,16 +1030,16 @@ function createBoss() {
     ringA.add(sp);
   }
   g.add(ringA, ringB);
-  const eyeMat = new THREE.MeshBasicMaterial({ color: 0xff3355 });
+  const eyeMat = new THREE.MeshBasicMaterial({ color: hdr(0xff3355, 3) });
   const eye = new THREE.Mesh(new THREE.SphereGeometry(1.1, 16, 12), eyeMat);
   eye.position.z = 2.6;
   g.add(eye);
-  const eyeGlow = glowSprite(0xff3355, 6);
+  const eyeGlow = glowSprite(0xff3355, 6, 3);
   eyeGlow.position.z = 3;
   g.add(eyeGlow);
-  const shieldMat = additive(0x66ddff, 0.45, { wireframe: true });
+  const shieldMat = additive(0x66ddff, 0.3, { wireframe: true }, 1.6);
   const shield = new THREE.Mesh(new THREE.IcosahedronGeometry(7, 2), shieldMat);
-  const shellMat = additive(0x3399ff, 0.1, { side: THREE.DoubleSide });
+  const shellMat = shieldMaterial(0x3aa8ff);
   const shell = new THREE.Mesh(new THREE.IcosahedronGeometry(6.9, 3), shellMat);
   g.add(shield, shell);
   scene.add(g);
@@ -911,8 +1067,8 @@ function dropShield(bonus) {
   b.stateT = 10 + bonus * 2;
   const st = BOSS_STATES[b.state];
   b.coreMat.emissive.setHex(st.color);
-  b.eyeMat.color.setHex(st.color);
-  b.eyeGlow.material.color.setHex(st.color);
+  b.eyeMat.color.setHex(st.color).multiplyScalar(3);
+  b.eyeGlow.material.color.setHex(st.color).multiplyScalar(3);
   banner(`護盾破除 · ${st.label}`, `${st.hint}（弱點：${WEAPONS[st.weak].zh} ${WEAPONS[st.weak].name}）`, false, 3000);
   flash(0.5);
   if (b.state === 'SWARM') {
@@ -929,8 +1085,8 @@ function raiseShield() {
   b.shieldUp = true;
   b.state = null;
   b.coreMat.emissive.setHex(0xff3355);
-  b.eyeMat.color.setHex(0xff3355);
-  b.eyeGlow.material.color.setHex(0xff3355);
+  b.eyeMat.color.setHex(0xff3355).multiplyScalar(3);
+  b.eyeGlow.material.color.setHex(0xff3355).multiplyScalar(3);
   while (drones.length) removeAt(drones, drones.length - 1);
   banner('護盾重新展開', '再次破解！');
   sfx.shield();
@@ -1028,10 +1184,11 @@ function updateBoss(dt, rawDt) {
   b.shell.scale.setScalar(b.shieldScale);
   b.shield.rotation.y += dt * 0.3;
   b.shieldFlash = Math.max(0, b.shieldFlash - rawDt * 2);
-  b.shieldMat.opacity = 0.4 + b.shieldFlash;
-  b.shellMat.opacity = 0.08 + b.shieldFlash * 0.3;
+  b.shieldMat.opacity = 0.25 + b.shieldFlash;
+  b.shellMat.uniforms.uFlash.value = b.shieldFlash;
+  b.shellMat.uniforms.uTime.value = S.time;
   b.flash = Math.max(0, b.flash - rawDt);
-  b.coreMat.emissiveIntensity = 0.6 + b.flash * 10;
+  b.coreMat.emissiveIntensity = 1.2 + b.flash * 14;
   b.hackCd -= rawDt;
 
   if (S.phase === 'boss') {
@@ -1046,7 +1203,7 @@ function updateBoss(dt, rawDt) {
   if (S.phase === 'bossDown') {
     b.mesh.rotation.z += rawDt * 2;
     if (Math.random() < rawDt * 10) {
-      spawnBurst(b.x + rand(-4, 4), b.y + rand(-4, 4), b.z + rand(-2, 3), pick([0xffb070, 0xff5c7c, 0xffffff]), 30, 14, 1.4, 0.8, true);
+      spawnExplosion(b.x + rand(-4, 4), b.y + rand(-4, 4), b.z + rand(-2, 3), pick([0xff8a40, 0xff5c7c, 0xffd0a0]), 0.9, true);
       sfx.boom(true);
       S.shake = Math.max(S.shake, 0.4);
     }
@@ -1076,7 +1233,7 @@ function updateDrones(dt) {
 
 /* ================= 結算 / 整備 / 排行 ================= */
 function finishBoss() {
-  spawnBurst(boss.x, boss.y, boss.z, 0xffffff, 80, 30, 2, 1.2, true);
+  spawnExplosion(boss.x, boss.y, boss.z, 0xffc080, 2.6, true);
   flash(1);
   scene.remove(boss.mesh);
   boss = null;
@@ -1152,7 +1309,7 @@ function die() {
   if (S.hacking) { hack.abort(); S.hacking = false; }
   $('choice').classList.add('hidden');
   S.tsTarget = 0.35;
-  spawnBurst(ship.x, ship.y, 0, 0x66ddff, 60, 18, 1.5, 1.4);
+  spawnExplosion(ship.x, ship.y, 0, 0x66ddff, 1.4);
   spawnBurst(ship.x, ship.y, 0, 0xffaa55, 40, 10, 1.2, 1.2);
   shipModel.group.visible = false;
   laserHide();
@@ -1243,7 +1400,7 @@ function update(rawDt) {
   tunnelUniforms.uHit.value = S.hitFlash;
 
   // 光速流線
-  const sLen = clamp(speed * 0.05, 1, 4) * (1 + tunnelUniforms.uWarp.value * 6);
+  const sLen = clamp(speed * 0.05, 1, 4) * (1 + tunnelUniforms.uWarp.value * 3);
   for (let i = 0; i < STREAKS; i++) {
     const s = streaks[i];
     s.z += speed * dt * 1.3;
@@ -1273,11 +1430,11 @@ function update(rawDt) {
   const spin = S.dash > 0 ? -S.dashDir * (1 - S.dash / 0.38) * TAU : 0;
   sm.group.rotation.set(clamp(ship.vy * 0.03, -0.5, 0.5), clamp(-ship.vx * 0.01, -0.3, 0.3), clamp(-ship.vx * 0.045, -0.9, 0.9) + spin);
   sm.flame.scale.set(1, 1 + (S.speedMul - 1) * 1.6 + Math.random() * 0.3, 1);
-  sm.glow.scale.setScalar(1.0 + (S.speedMul - 1) * 0.6 + Math.random() * 0.2);
+  sm.glow.scale.setScalar(0.7 + (S.speedMul - 1) * 0.5 + Math.random() * 0.1);
   sm.bubble.visible = S.deflect > 0 || warpOn;
   sm.bubble.rotation.y += rawDt * 2;
   if (S.phase !== 'dead' && S.phase !== 'over') sm.group.visible = S.invuln > 0 ? Math.floor(S.time * 20) % 2 === 0 : true;
-  shipLight.position.set(ship.x, ship.y + 1, 1);
+  shipLight.position.set(ship.x, ship.y + 3, 3);
 
   // 能量自然回復
   if (S.weapon !== 'laser' || S.laserLock || !combat) S.energy = Math.min(100, S.energy + S.energyRegen * dt);
@@ -1302,6 +1459,7 @@ function update(rawDt) {
   updatePickups(dt, speed);
   if (boss) { updateBoss(dt, rawDt); updateDrones(dt); }
   updateFx(dt, speed);
+  updateTrails(dt, speed);
 
   if (S.phase === 'bossDown') { S.phaseT -= rawDt; if (S.phaseT <= 0 && boss) finishBoss(); }
   if (S.phase === 'dead') { S.phaseT -= rawDt; if (S.phaseT <= 0) endRun(true); }
@@ -1324,7 +1482,15 @@ function update(rawDt) {
   flashV = Math.max(0, flashV - rawDt * 3);
   $('flash').style.opacity = flashV.toFixed(3);
   const sl = $('speedlines');
-  sl.style.opacity = (tunnelUniforms.uWarp.value * 0.85).toFixed(3);
+  const warpV = tunnelUniforms.uWarp.value;
+  sl.style.opacity = (warpV * (QUALITY[quality].post ? 0.3 : 0.85)).toFixed(3);
+  // 後製參數：超光速時色散與放射模糊加強、泛光更亮
+  const lu = post.lens.uniforms;
+  lu.uWarp.value = warpV;
+  lu.uHit.value = S.hitFlash;
+  lu.uTime.value = S.time;
+  post.bloom.strength = 0.7 + warpV * 0.25 + flashV * 0.6;
+  streakMat.color.setScalar(1.3 - warpV * 0.5);
   if (tunnelUniforms.uWarp.value > 0.01) sl.style.transform = `rotate(${(Math.random() * 6).toFixed(2)}deg)`;
   $('vignette').classList.toggle('hurt', S.hitFlash > 0.2 || (S.hull / S.hullMax < 0.25 && live));
 
@@ -1460,11 +1626,27 @@ function updateHUD() {
   $('btnHack').classList.toggle('hidden', !showHack);
 }
 
+function render() {
+  if (QUALITY[quality].post) post.composer.render();
+  else renderer.render(scene, camera);
+}
+// 掉幀保護：平均每幀超過 22ms（約低於 45fps）就自動降低解析度，順暢時再慢慢調回來
+let frameAvg = 16, perfT = 0;
+function autoScale(ms, rawDt) {
+  frameAvg = lerp(frameAvg, ms, 0.05);
+  perfT += rawDt;
+  if (perfT < 2) return;
+  perfT = 0;
+  if (frameAvg > 22 && dynScale > 0.55) { dynScale = Math.max(0.55, dynScale - 0.15); resize(); }
+  else if (frameAvg < 14 && dynScale < 1) { dynScale = Math.min(1, dynScale + 0.1); resize(); }
+}
 function loop(now) {
-  const rawDt = Math.min(0.05, (now - last) / 1000);
+  const ms = now - last;
+  const rawDt = Math.min(0.05, ms / 1000);
   last = now;
   if (!S.paused) update(rawDt);
-  renderer.render(scene, camera);
+  render();
+  if (!document.hidden) autoScale(ms, rawDt);
   requestAnimationFrame(loop);
 }
 
@@ -1472,7 +1654,11 @@ function loop(now) {
 $('pilot').value = prefs.name;
 $('sens').value = String(prefs.sens);
 $('invert').checked = !!prefs.invert;
-const savePrefs = () => { prefs.name = $('pilot').value.trim(); prefs.sens = +$('sens').value; prefs.invert = $('invert').checked; Prefs.save(prefs); };
+quality = clamp(prefs.quality ?? (isMobile ? 1 : 2), 0, 2);
+$('quality').value = String(quality);
+resize();
+$('quality').addEventListener('change', () => { quality = +$('quality').value; dynScale = 1; resize(); savePrefs(); });
+const savePrefs = () => { prefs.name = $('pilot').value.trim(); prefs.sens = +$('sens').value; prefs.invert = $('invert').checked; prefs.quality = quality; Prefs.save(prefs); };
 $('pilot').addEventListener('change', savePrefs);
 $('sens').addEventListener('change', savePrefs);
 $('invert').addEventListener('change', savePrefs);
@@ -1504,6 +1690,6 @@ requestAnimationFrame(loop);
 
 // 給除錯用
 window.__trs = {
-  get S() { return S; }, rocks, startBossHack, useBoost, get boss() { return boss; }, hack,
-  step(sec) { for (let t = 0; t < sec; t += 1 / 60) update(1 / 60); renderer.render(scene, camera); },
+  get S() { return S; }, rocks, startBossHack, useBoost, get boss() { return boss; }, hack, shipModel, trails, post, scene, renderer,
+  step(sec) { for (let t = 0; t < sec; t += 1 / 60) update(1 / 60); render(); },
 };
