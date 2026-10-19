@@ -9,6 +9,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700;900&family=Noto+Sans+TC:wght@400;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="hud.css">
 <script type="importmap">{ "imports": {
   "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
   "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
@@ -20,31 +21,31 @@
 <div id="vignette"></div>
 <div id="flash"></div>
 
-<!-- 遊戲中介面 -->
+<!-- 遊戲中介面（參考示意圖的配置） -->
 <div id="hud" class="hidden">
-  <div class="hud-top">
-    <div class="hud-l"><div class="big" id="score">0</div><div class="lbl">SCORE</div><div class="sub"><span id="time">0:00.0</span> · ◆<span id="credits">0</span></div></div>
-    <div class="hud-c"><div id="phase">WAVE 1/3</div><div class="bar thin"><i id="progress"></i></div></div>
-    <div class="hud-r"><div class="big" id="kills">0</div><div class="lbl">KILLS</div></div>
+  <div class="hud-score">
+    <div class="big" id="score">0</div>
+    <div class="shard"><i>◆</i><span><small>DATA SHARD</small><b id="credits">0</b></span></div>
+    <div class="sub"><span id="time">0:00.0</span> · KILLS <b id="kills">0</b></div>
   </div>
-  <div class="hud-bars">
-    <div class="bar hull"><i id="hull"></i><span>船體</span></div>
-    <div class="bar energy"><i id="energy"></i><span>能量</span></div>
-  </div>
-  <div id="bossbar" class="hidden"><div class="bb-name">GUARDIAN <span id="bossState"></span></div><div class="bar boss"><i id="bosshp"></i></div></div>
+  <div class="hud-c"><div id="phase">WAVE 1/3</div><div class="seg"><i id="progress"></i></div></div>
+  <div id="bossbar" class="hidden"><div class="bb-name">MOTHERSHIP “NEMESIS” <span id="bossState"></span></div><div class="seg boss"><i id="bosshp"></i></div></div>
   <div id="banner"><div class="b1"></div><div class="b2"></div></div>
   <div id="toasts"></div>
-  <button id="btnBoost" class="btn-round"><b>BOOST</b><span id="boostPips"></span></button>
+  <div id="comm" class="comm"><div class="face"></div><div class="said"><small>QUEEN · 駭客女王</small><p></p></div></div>
+  <div class="hud-ship">
+    <button id="btnBoost" class="fever"><span class="ring"></span><i>⚡</i><b>BOOST</b><span id="boostPips"></span></button>
+    <div class="ship-stat"><div class="ship-icon"></div><div class="bars"><div class="bar hull"><i id="hull"></i></div><div class="bar energy"><i id="energy"></i></div></div></div>
+  </div>
   <div id="weapons"></div>
   <button id="btnHack" class="hidden">⌬ HACK<small>破解護盾</small></button>
   <div class="hud-corner"><button id="btnCal" title="重新校正陀螺儀">◎</button><button id="btnPause" title="暫停">❚❚</button></div>
 </div>
 
-<!-- 破解小遊戲 -->
+<!-- 破解小遊戲：右側的圓形全息面板，戰鬥在背後慢動作繼續 -->
 <div id="hack" class="overlay hack hidden">
   <div class="hack-panel">
-    <div class="hack-title"></div>
-    <div class="hack-info"></div>
+    <div class="hack-head"><div class="face"></div><div><div class="hack-title"></div><div class="hack-info"></div></div></div>
     <div class="hack-time"><i></i></div>
     <div class="hack-grid"></div>
     <div class="hack-legend"><span class="lg s">起點</span><span class="lg g">終點</span><span class="lg b">◆ 加成</span><span class="lg x">障壁</span></div>
@@ -53,8 +54,8 @@
 
 <!-- 三選一 -->
 <div id="choice" class="overlay hidden">
-  <div class="panel wide">
-    <h2>資料閘門 · 選擇一項強化</h2>
+  <div class="panel wide holo">
+    <div class="hack-head"><div class="face"></div><div><div class="hack-title">資料閘門</div><div class="hack-info">「選一個吧，指揮官。」</div></div></div>
     <div id="cards" class="cards"></div>
   </div>
 </div>
@@ -62,6 +63,7 @@
 <!-- 標題 -->
 <div id="title" class="overlay">
   <div class="panel title-panel">
+    <div class="title-art"></div>
     <h1 class="logo">TRS<span>RUSH</span></h1>
     <p class="tag">WORMHOLE RUNNER · 蟲洞跑酷射擊</p>
     <label class="field">機師代號 <input id="pilot" maxlength="12" placeholder="PILOT" autocomplete="off"></label>

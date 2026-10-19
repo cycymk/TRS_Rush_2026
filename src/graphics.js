@@ -195,7 +195,7 @@ export function shieldMaterial(color) {
         float f = pow(1.0 - abs(dot(normalize(vN), vV)), 3.0);
         float hex = pow(0.5 + 0.5 * sin(vP.x * 3.0 + uTime) * sin(vP.y * 3.0 - uTime * 0.7) * sin(vP.z * 3.0), 6.0);
         float scan = pow(0.5 + 0.5 * sin(vP.y * 2.0 - uTime * 3.0), 20.0);
-        vec3 c = uColor * (f * 2.2 + hex * 0.35 + scan * 0.5) * (1.0 + uFlash * 4.0);
+        vec3 c = uColor * (f * 1.6 + hex * 0.08 + scan * 0.12) * (1.0 + uFlash * 4.0);
         gl_FragColor = vec4(c, 1.0);
       }`,
   });

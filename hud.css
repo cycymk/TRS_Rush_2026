@@ -1,0 +1,133 @@
+/* ================= 參考示意圖風格的介面（覆蓋 style.css 的舊版 HUD） ================= */
+:root { --holo: #59d8ff; --holo-dim: rgba(89, 216, 255, .35); --hp: #2ee6ff; }
+
+/* 左上：分數＋DATA SHARD */
+.hud-score { position: absolute; top: calc(8px + var(--safe-t)); left: calc(10px + var(--safe-l)); }
+.hud-score .big { font-size: 26px; font-weight: 900; letter-spacing: 1px; padding: 2px 18px 2px 10px; display: inline-block;
+  background: linear-gradient(90deg, rgba(10, 20, 40, .75), rgba(10, 20, 40, .2)); clip-path: polygon(0 0, 100% 0, calc(100% - 12px) 100%, 0 100%);
+  border-left: 3px solid var(--holo); text-shadow: 0 0 10px rgba(89, 216, 255, .6); }
+.shard { display: flex; align-items: center; gap: 6px; margin-top: 6px; }
+.shard i { font-style: normal; font-size: 22px; color: #9ff3ff; text-shadow: 0 0 10px var(--holo); }
+.shard span { display: flex; flex-direction: column; line-height: 1.05; }
+.shard small { font-size: 9px; letter-spacing: 2px; color: var(--dim); }
+.shard b { font-size: 18px; color: #bff7ff; }
+.hud-score .sub { font-size: 10px; margin-top: 4px; color: var(--dim); }
+.hud-score .sub b { color: var(--ink); }
+
+/* 上方中間：分段式進度條／母艦血條 */
+.hud-c { position: absolute; top: calc(8px + var(--safe-t)); left: 50%; transform: translateX(-50%); width: min(46vw, 420px); text-align: center; font-size: 11px; letter-spacing: 3px; }
+#hud.boss-mode .hud-c { display: none; }
+.seg { position: relative; height: 9px; margin-top: 5px; background: rgba(255, 255, 255, .06); border: 1px solid var(--holo-dim); }
+.seg i { position: absolute; inset: 0 auto 0 0; width: 100%; background: linear-gradient(90deg, #2fa8ff, var(--hp));
+  -webkit-mask: repeating-linear-gradient(90deg, #000 0 calc(10% - 3px), transparent calc(10% - 3px) 10%);
+  mask: repeating-linear-gradient(90deg, #000 0 calc(10% - 3px), transparent calc(10% - 3px) 10%); }
+#bossbar { position: absolute; top: calc(8px + var(--safe-t)); left: 50%; transform: translateX(-50%); width: min(52vw, 480px); text-align: center; }
+#bossbar .bb-name { font-size: 12px; letter-spacing: 3px; color: #ffd6dc; text-shadow: 0 0 8px rgba(255, 60, 80, .7); }
+.seg.boss { height: 11px; border-color: rgba(255, 70, 90, .6); }
+.seg.boss i { background: linear-gradient(90deg, #ff2440, #ff5a4a); }
+
+/* 左下：BOOST 圓形量表＋飛船狀態 */
+.hud-ship { position: absolute; left: calc(12px + var(--safe-l)); bottom: calc(12px + var(--safe-b)); display: flex; align-items: flex-end; gap: 10px; }
+.fever { position: relative; width: 92px; height: 92px; border-radius: 50%; border: none; pointer-events: auto;
+  background: radial-gradient(circle, rgba(20, 30, 50, .85) 58%, transparent 60%);
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 1px; }
+.fever .ring { position: absolute; inset: 0; border-radius: 50%;
+  background: conic-gradient(#ffd23f calc(var(--p, 0) * 1turn), rgba(255, 255, 255, .12) 0);
+  -webkit-mask: radial-gradient(circle, transparent 60%, #000 62%); mask: radial-gradient(circle, transparent 60%, #000 62%);
+  filter: drop-shadow(0 0 6px rgba(255, 210, 63, .7)); }
+.fever > i { font-style: normal; font-size: 24px; color: #ffd23f; text-shadow: 0 0 10px #ffb000; line-height: 1; }
+.fever b { font-size: 10px; letter-spacing: 2px; }
+.fever:active { transform: scale(.94); }
+.fever.empty { opacity: .5; }
+.fever #boostPips { display: flex; gap: 3px; }
+.fever #boostPips i { width: 7px; height: 7px; border-radius: 50%; border: 1px solid #ffd23f; }
+.fever #boostPips i.on { background: #ffd23f; box-shadow: 0 0 5px #ffd23f; }
+.ship-stat { display: flex; align-items: center; gap: 8px; padding: 6px 12px 6px 6px; margin-bottom: 6px;
+  background: linear-gradient(90deg, rgba(10, 20, 40, .7), rgba(10, 20, 40, .15)); border-left: 2px solid var(--holo); }
+.ship-icon { width: 46px; height: 46px; background: rgba(89, 216, 255, .12) url(assets/ship.png) center/contain no-repeat;
+  clip-path: polygon(50% 0, 100% 25%, 100% 75%, 50% 100%, 0 75%, 0 25%); }
+.ship-stat .bars { width: min(24vw, 180px); display: grid; gap: 4px; }
+.ship-stat .bar { height: 8px; border-radius: 0; border-color: var(--holo-dim); }
+.ship-stat .bar.hull i { background: linear-gradient(90deg, #e9f6ff, var(--hp)); }
+.ship-stat .bar.energy { height: 5px; }
+
+/* 右下：六角形武器鈕 */
+#weapons { right: calc(10px + var(--safe-r)); bottom: calc(10px + var(--safe-b)); display: flex; gap: 4px; }
+.wbtn { width: 66px; height: 74px; border: none; border-radius: 0; isolation: isolate;
+  background: color-mix(in srgb, var(--wc) 45%, transparent);
+  clip-path: polygon(50% 0, 100% 25%, 100% 75%, 50% 100%, 0 75%, 0 25%); }
+.wbtn::before { content: ''; position: absolute; inset: 2px; background: rgba(10, 16, 34, .88); clip-path: inherit; z-index: -1; }
+.wbtn.on { background: var(--wc); box-shadow: none; filter: drop-shadow(0 0 8px var(--wc)); }
+.wbtn.on::before { background: color-mix(in srgb, var(--wc) 22%, rgba(10, 16, 34, .9)); }
+.wbtn .lv { top: auto; bottom: 9px; right: 50%; transform: translateX(50%); font-size: 8px; }
+.wbtn small { display: none; }
+.wbtn.weak::after { top: 4px; }
+
+/* 中下：HACK 鈕 */
+#btnHack { bottom: calc(26px + var(--safe-b)); border-radius: 0; border: none;
+  clip-path: polygon(8% 0, 92% 0, 100% 50%, 92% 100%, 8% 100%, 0 50%);
+  background: linear-gradient(180deg, rgba(255, 60, 200, .6), rgba(90, 10, 80, .85)); }
+
+/* 右上：暫停／校正 */
+.hud-corner { top: calc(10px + var(--safe-t)); }
+
+/* 領航員（駭客女王）頭像：從角色圖裁出臉部 */
+.face { background: url(assets/queen.webp) no-repeat; background-size: 853% auto; background-position: 65.3% 23.1%;
+  border-radius: 50%; border: 2px solid #b78bff; box-shadow: 0 0 12px rgba(160, 110, 255, .6); flex: none; }
+.comm { position: absolute; left: calc(12px + var(--safe-l)); top: 32%; display: flex; gap: 8px; align-items: center; max-width: min(46vw, 330px);
+  opacity: 0; transform: translateX(-16px); transition: opacity .25s, transform .25s; pointer-events: none; }
+.comm.show { opacity: 1; transform: none; }
+.comm .face { width: 52px; height: 52px; }
+.comm .said { background: linear-gradient(90deg, rgba(40, 18, 70, .85), rgba(40, 18, 70, .35)); border-left: 2px solid #b78bff; padding: 6px 12px 7px; }
+.comm small { font-size: 9px; letter-spacing: 2px; color: #cdb4ff; }
+.comm p { margin: 2px 0 0; font-size: 13px; line-height: 1.45; font-family: 'Noto Sans TC', sans-serif; }
+
+/* 破解面板：右側圓形全息，戰鬥在背後繼續 */
+.overlay.hack { background: transparent; backdrop-filter: none; justify-content: flex-end; pointer-events: none; padding-right: calc(16px + var(--safe-r)); overflow: hidden; }
+.hack-panel { pointer-events: auto; width: min(330px, 64vh); position: relative; padding: 10px 26px 26px; border: none; box-shadow: none;
+  background: radial-gradient(circle at 50% 56%, rgba(8, 36, 64, .8) 52%, rgba(8, 36, 64, .3) 70%, transparent 71%); }
+.hack-panel::before { content: ''; position: absolute; left: 0; right: 0; top: 50%; aspect-ratio: 1; transform: translateY(-46%); border-radius: 50%;
+  border: 1px solid var(--holo-dim); box-shadow: 0 0 30px rgba(89, 216, 255, .25), inset 0 0 30px rgba(89, 216, 255, .15); pointer-events: none;
+  background: repeating-conic-gradient(from 0deg, transparent 0 8deg, rgba(89, 216, 255, .22) 8deg 9deg);
+  -webkit-mask: radial-gradient(circle, transparent 66%, #000 67%); mask: radial-gradient(circle, transparent 66%, #000 67%);
+  animation: holo-spin 14s linear infinite; }
+@keyframes holo-spin { to { transform: translateY(-46%) rotate(360deg); } }
+.hack-head { display: flex; gap: 10px; align-items: center; text-align: left; margin-bottom: 6px; }
+.hack-head .face { width: 44px; height: 44px; }
+.hack-title { color: #9ff3ff; text-shadow: 0 0 8px var(--holo); }
+.cell { border-radius: 2px; border-color: rgba(89, 216, 255, .3); background: rgba(89, 216, 255, .06); }
+.cell.path { background: rgba(89, 216, 255, .4); border-color: var(--holo); }
+.cell.head { background: #9ff3ff; box-shadow: 0 0 14px var(--holo); }
+.hack-time i { background: linear-gradient(90deg, #2fa8ff, var(--holo)); }
+.hack.ok .hack-panel, .hack.fail .hack-panel { box-shadow: none; animation: none; }
+.hack.ok .hack-panel::before { border-color: var(--green); box-shadow: 0 0 40px var(--green); }
+.hack.fail .hack-panel::before { border-color: var(--red); box-shadow: 0 0 40px var(--red); }
+
+/* 三選一、標題 */
+.panel.holo .hack-head { justify-content: center; margin-bottom: 14px; }
+.panel.holo .hack-head .face { width: 56px; height: 56px; }
+.title-art { height: 110px; background: url(assets/ship.png) center/contain no-repeat; filter: drop-shadow(0 0 18px rgba(80, 170, 255, .6)); margin: -6px 0 2px; }
+
+@media (max-height: 420px) {
+  .fever { width: 76px; height: 76px; }
+  .wbtn { width: 54px; height: 62px; }
+  .ship-icon { width: 36px; height: 36px; }
+  .title-art { height: 64px; }
+  .hud-score .big { font-size: 20px; }
+  .comm { top: 28%; }
+  .overlay.hack { padding-top: 50px; padding-bottom: 6px; align-items: flex-start; padding-right: calc(10px + var(--safe-r)); }
+  .hack-panel { width: auto; padding: 4px 18px 8px; }
+  .hack-head { margin-bottom: 3px; }
+  .hack-head .face { width: 30px; height: 30px; }
+  .hack-info, .hack-legend { display: none; }
+  .hack-title { font-size: 13px; }
+  .hack-time { margin-bottom: 5px; }
+  .hack .hack-grid { width: min(210px, calc(100vh - 165px)); gap: 3px; }
+  .title-panel .tag { display: none; }
+  .title-panel .help { font-size: 10px; }
+}
+@media (orientation: portrait) {
+  #weapons { flex-wrap: wrap; width: 140px; justify-content: flex-end; }
+  .ship-stat .bars { width: 24vw; }
+  .hack-panel { width: min(330px, 92vw); }
+}

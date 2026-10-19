@@ -20,6 +20,11 @@ const SPAWN_Z = -330;         // 物件從多遠出現
 const BASE_SPEED = 62;
 const WAVES_PER_ROUND = 3;
 const BOSS_Z = -46;
+const BOSS_W = 54;          // 母艦圖片在遊戲內的寬度
+const BK = BOSS_W / 34;
+const BOSS_R = 7.2;         // 母艦本體的命中半徑
+const BOSS_SHIELD_R = 9.6 * BK;
+const BOSS_Y = 3.4;         // 母艦懸停在畫面偏上方，不被飛船擋住
 
 const WEAPONS = {
   pulse:   { name: 'PULSE',   zh: '單發', icon: '●', color: 0x7fd8ff, rate: [2.4, 3.0, 3.6], dmg: [4, 5.5, 7.5], speed: 230, pellets: [1, 1, 1], spread: 0, assist: 1.8 },
@@ -70,7 +75,8 @@ let boomIdx = 0;
 
 const post = createPost(renderer, scene, camera);
 const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent) || (navigator.maxTouchPoints > 1 && window.innerWidth < 1100);
-let dynScale = 1;     // 自動降解析度（掉幀時）
+let dynScale = 1;
+let baseFov = 72;     // 自動降解析度（掉幀時）
 let quality = 2;
 function resize() {
   // 泛光會把畫面一路縮小 5 次，尺寸太小（例如視窗被隱藏時）會產生空的緩衝區
@@ -82,6 +88,8 @@ function resize() {
   post.composer.setSize(w, h);
   post.lens.uniforms.uAspect.value = w / h;
   camera.aspect = w / h;
+  // 寬螢幕（手機橫拿）時拉近鏡頭，讓水平視野維持差不多，角色才不會變很小
+  baseFov = clamp(2 * Math.atan(Math.tan(50 * Math.PI / 180) / camera.aspect) * 180 / Math.PI, 54, 72);
   camera.updateProjectionMatrix();
 }
 window.addEventListener('resize', resize);
@@ -133,7 +141,7 @@ function place(o) {
 /* ================= 蟲洞隧道 ================= */
 const tunnelUniforms = {
   uTime: { value: 0 }, uTravel: { value: 0 }, uWarp: { value: 0 }, uHit: { value: 0 },
-  uBend: { value: bend }, uLen: { value: TUNNEL_LEN },
+  uBend: { value: bend }, uLen: { value: TUNNEL_LEN }, uDim: { value: 1 },
   uColA: { value: new THREE.Color() }, uColB: { value: new THREE.Color() },
 };
 const tunnelGeo = new THREE.CylinderGeometry(TUNNEL_R, TUNNEL_R, TUNNEL_LEN, 72, 160, true);
@@ -154,7 +162,7 @@ const tunnel = new THREE.Mesh(tunnelGeo, new THREE.ShaderMaterial({
       gl_Position = projectionMatrix * modelViewMatrix * vec4(p, 1.0);
     }`,
   fragmentShader: /* glsl */`
-    uniform float uTime, uTravel, uWarp, uLen, uHit;
+    uniform float uTime, uTravel, uWarp, uLen, uHit, uDim;
     uniform vec3 uColA, uColB;
     varying vec2 vUv; varying float vZ;
     float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
@@ -184,7 +192,8 @@ const tunnel = new THREE.Mesh(tunnelGeo, new THREE.ShaderMaterial({
       col += vec3(0.75, 0.9, 1.0) * streak * uWarp * 0.9;
       // 隧道盡頭的強光（亮度超過 1，會在泛光下形成光暈）
       float far = clamp(-vZ / (uLen - 60.0), 0.0, 1.0);
-      col = mix(col, (uColB * 0.6 + 0.4) * 2.4, pow(far, 2.6) * 0.97);
+      col *= uDim;
+      col = mix(col, (uColB * 0.6 + 0.4) * 2.4 * mix(0.6, 1.0, uDim), pow(far, 2.6) * 0.97);
       col += vec3(1.0, 0.1, 0.2) * uHit * 0.8;
       gl_FragColor = vec4(col, 1.0);
       #include <tonemapping_fragment>
@@ -216,68 +225,70 @@ scene.add(streakMesh);
 const streaks = Array.from({ length: STREAKS }, () => ({ a: rand(0, TAU), r: rand(2.5, 10.5), z: rand(SPAWN_Z, 10) }));
 const dummy = new THREE.Object3D();
 
+/* ================= 美術素材（設定圖直接當成 2.5D 角色） ================= */
+const texLoader = new THREE.TextureLoader();
+function artTex(url) {
+  const t = texLoader.load(url);
+  t.colorSpace = THREE.SRGBColorSpace;
+  t.anisotropy = 4;
+  return t;
+}
+const ART = {
+  ship: { tex: artTex('assets/ship.png'), w: 768, h: 512 },
+  enemy: { tex: artTex('assets/enemy.png'), w: 512, h: 512 },
+  boss: { tex: artTex('assets/boss.webp'), w: 1536, h: 1024 },
+};
+// 建立面向鏡頭的圖片；width＝遊戲內寬度，(cx, cy)＝圖片上的錨點像素
+function artSprite(art, width, cx, cy) {
+  const mat = new THREE.SpriteMaterial({ map: art.tex, transparent: true, alphaTest: 0.03, depthWrite: false, toneMapped: false, fog: false });
+  const s = new THREE.Sprite(mat);
+  const height = width * art.h / art.w;
+  s.scale.set(width, height, 1);
+  s.center.set(cx / art.w, 1 - cy / art.h);
+  // 把圖片上的像素位置換算成本地座標，用來貼發光點
+  s.userData.at = (px, py, z = 0.05) => new THREE.Vector3((px - cx) / art.w * width, -(py - cy) / art.h * height, z);
+  return s;
+}
+
 /* ================= 玩家飛船 ================= */
+const SHIP_W = 4.3;
 function buildShip() {
   const group = new THREE.Group();
-  // 烤漆金屬：清漆層＋高金屬度，會映出隧道的光
-  const hullMat = new THREE.MeshPhysicalMaterial({ color: 0x9aa3b8, metalness: 0.85, roughness: 0.3, clearcoat: 1, clearcoatRoughness: 0.1, envMapIntensity: 0.55 });
-  const darkMat = new THREE.MeshPhysicalMaterial({ color: 0x23283a, metalness: 0.9, roughness: 0.35, clearcoat: 0.6, envMapIntensity: 0.6 });
-  const accentMat = new THREE.MeshStandardMaterial({ color: 0x111122, emissive: 0x7fd8ff, emissiveIntensity: 3.5 });
-  const glassMat = new THREE.MeshPhysicalMaterial({ color: 0x0a1830, metalness: 0.2, roughness: 0.02, clearcoat: 1, emissive: 0x1a4a80, emissiveIntensity: 0.6 });
-
-  const body = new THREE.Mesh(new THREE.ConeGeometry(0.55, 2.8, 8), hullMat);
-  body.rotation.x = -Math.PI / 2;
-  body.scale.set(1, 1, 0.75);
-  group.add(body);
-  const spine = new THREE.Mesh(new THREE.BoxGeometry(0.28, 0.22, 1.9), darkMat);
-  spine.position.set(0, 0.28, 0.35);
-  group.add(spine);
-  // 後掠翼
-  const wingShape = new THREE.Shape();
-  wingShape.moveTo(0.2, -0.3); wingShape.lineTo(1.8, 0.55); wingShape.lineTo(1.85, 0.95); wingShape.lineTo(0.25, 0.95); wingShape.closePath();
-  const wingGeo = new THREE.ExtrudeGeometry(wingShape, { depth: 0.07, bevelEnabled: true, bevelThickness: 0.02, bevelSize: 0.03, bevelSegments: 1 });
-  wingGeo.rotateX(Math.PI / 2);
-  for (const sx of [-1, 1]) {
-    const wing = new THREE.Mesh(wingGeo, hullMat);
-    wing.scale.x = sx;
-    wing.position.set(0, -0.02, 0.05);
-    group.add(wing);
-    const stripe = new THREE.Mesh(new THREE.BoxGeometry(1.2, 0.02, 0.06), accentMat);
-    stripe.position.set(sx * 1.05, 0.06, 0.62);
-    stripe.rotation.y = sx * -0.48;
-    group.add(stripe);
-    const tip = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.32, 0.7), accentMat);
-    tip.position.set(sx * 1.83, 0.08, 0.72);
-    group.add(tip);
-    const fin = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.6, 0.75), darkMat);
-    fin.position.set(sx * 0.42, 0.38, 0.95);
-    fin.rotation.z = sx * -0.38;
-    group.add(fin);
-    // 引擎噴嘴
-    const nozzle = new THREE.Mesh(new THREE.CylinderGeometry(0.2, 0.26, 0.55, 12, 1, true), darkMat);
-    nozzle.rotation.x = Math.PI / 2;
-    nozzle.position.set(sx * 0.32, -0.02, 1.25);
-    group.add(nozzle);
-    const core = new THREE.Mesh(new THREE.CircleGeometry(0.19, 12), additive(0x9fe8ff, 1, {}, 1.4));
-    core.position.set(sx * 0.32, -0.02, 1.5);
-    group.add(core);
+  const sprite = artSprite(ART.ship, SHIP_W, 384, 225);
+  group.add(sprite);
+  const at = sprite.userData.at;
+  // 兩具主引擎：核心亮點＋往下延伸的火焰光
+  const engines = [];
+  for (const [px, py] of [[293, 322], [476, 322]]) {
+    const core = glowSprite(0x6fd0ff, 1.1, 3);
+    core.position.copy(at(px, py, 0.2));
+    const plume = glowSprite(0x3f8cff, 1, 1.6);
+    plume.position.copy(at(px, py + 70, 0.15));
+    group.add(core, plume);
+    engines.push({ core, plume });
   }
-  const cockpit = new THREE.Mesh(new THREE.SphereGeometry(0.3, 16, 10), glassMat);
-  cockpit.scale.set(1, 0.7, 1.9);
-  cockpit.position.set(0, 0.24, -0.35);
-  group.add(cockpit);
-  const flame = new THREE.Mesh(new THREE.ConeGeometry(0.32, 1.6, 12, 1, true), additive(0x66ddff, 0.5, {}, 1.0));
-  flame.rotation.x = Math.PI / 2;
-  flame.position.z = 2.2;
-  group.add(flame);
-  const glow = glowSprite(0x66ddff, 0.7, 0.6);
-  glow.position.z = 1.6;
-  group.add(glow);
-  const bubble = new THREE.Mesh(new THREE.IcosahedronGeometry(1.9, 1), additive(0x66ffcc, 0.25, { wireframe: true }, 2));
+  // 兩側推進器
+  const side = [];
+  for (const [px, py] of [[188, 268], [582, 268]]) {
+    const g = glowSprite(0x6fd0ff, 0.55, 2);
+    g.position.copy(at(px, py, 0.15));
+    group.add(g);
+    side.push(g);
+  }
+  // 機身中央的燈條：顏色跟著目前武器
+  const spine = glowSprite(0x7fd8ff, 0.7, 2.2);
+  spine.position.copy(at(384, 230, 0.2));
+  spine.scale.set(0.45, 1.6, 1);
+  group.add(spine);
+  const bubble = new THREE.Mesh(new THREE.IcosahedronGeometry(2.4, 1), additive(0x66ffcc, 0.25, { wireframe: true }, 2));
   bubble.visible = false;
   group.add(bubble);
   scene.add(group);
-  return { group, flame, glow, accentMat, bubble };
+  return {
+    group, sprite, engines, side, spine, bubble,
+    nozzles: [at(293, 322, 0.2), at(476, 322, 0.2)],
+    setWeaponColor(hex) { spine.material.color.setHex(hex).multiplyScalar(2.2); },
+  };
 }
 const shipModel = buildShip();
 const ship = { x: 0, y: 0, vx: 0, vy: 0, zOff: 0 };
@@ -296,12 +307,7 @@ function makeTrail(color, width, intensity) {
   scene.add(mesh);
   return { mesh, geo, pts: Array.from({ length: TRAIL_N }, () => new THREE.Vector3(0, 0, 50)), color: hdr(color, intensity), width, anchor: new THREE.Vector3() };
 }
-const trails = [
-  Object.assign(makeTrail(0x66ccff, 0.07, 0.7), { local: new THREE.Vector3(-0.32, -0.02, 1.5) }),
-  Object.assign(makeTrail(0x66ccff, 0.07, 0.7), { local: new THREE.Vector3(0.32, -0.02, 1.5) }),
-  Object.assign(makeTrail(0xffffff, 0.025, 0.8), { local: new THREE.Vector3(-1.83, 0.08, 1.0) }),
-  Object.assign(makeTrail(0xffffff, 0.025, 0.8), { local: new THREE.Vector3(1.83, 0.08, 1.0) }),
-];
+const trails = shipModel.nozzles.map((p) => Object.assign(makeTrail(0x4fb0ff, 0.09, 0.9), { local: p.clone() }));
 function updateTrails(dt, speed) {
   const on = shipModel.group.visible;
   shipModel.group.updateMatrixWorld();
@@ -351,9 +357,26 @@ const shotGeoBig = new THREE.CapsuleGeometry(0.13, 1.6, 2, 8).rotateX(Math.PI / 
 const shotGeoSmall = new THREE.CapsuleGeometry(0.07, 1.2, 2, 6).rotateX(Math.PI / 2);
 const shotMats = Object.fromEntries(WEAPON_KEYS.map((k) => [k, additive(WEAPONS[k].color, 1, {}, 5)]));
 const eshotGeo = new THREE.SphereGeometry(0.65, 14, 10);
-const eshotMat = additive(0xff3366, 1, {}, 4);
-const droneGeo = new THREE.OctahedronGeometry(0.9);
-const droneMat = new THREE.MeshPhysicalMaterial({ color: 0x1a2a1e, metalness: 0.9, roughness: 0.25, emissive: 0x7dff9a, emissiveIntensity: 2.5, flatShading: true, clearcoat: 1 });
+const eshotMat = additive(0xff3366, 1, {}, 2.6);
+// 小敵人（無人機）：設定圖＋紅色眼睛與四個推進器的發光點
+const DRONE_W = 5;
+function makeDroneModel() {
+  const g = new THREE.Group();
+  const sprite = artSprite(ART.enemy, DRONE_W, 268, 222);
+  g.add(sprite);
+  const at = sprite.userData.at;
+  const eye = glowSprite(0xff2a3a, 1.3, 3.5);
+  eye.position.copy(at(278, 222, 0.1));
+  g.add(eye);
+  const jets = [[168, 45], [470, 222], [45, 330], [305, 476]].map(([px, py]) => {
+    const j = glowSprite(0xff3040, 0.7, 2.5);
+    j.position.copy(at(px, py, 0.1));
+    g.add(j);
+    return j;
+  });
+  scene.add(g);
+  return { g, sprite, eye, jets };
+}
 const boostOrbGeo = new THREE.OctahedronGeometry(0.8);
 const boostOrbMat = new THREE.MeshPhysicalMaterial({ color: 0x113344, emissive: 0x44e8ff, emissiveIntensity: 3.5, flatShading: true, clearcoat: 1, metalness: 0.5, roughness: 0.1 });
 const repairOrbMat = new THREE.MeshPhysicalMaterial({ color: 0x113322, emissive: 0x66ff88, emissiveIntensity: 3.5, flatShading: true, clearcoat: 1, metalness: 0.5, roughness: 0.1 });
@@ -602,6 +625,15 @@ function toast(text, cls = '', gap = 0) {
   while (box.children.length > 4) box.firstChild.remove();
   setTimeout(() => el.remove(), 1000);
 }
+// 領航員（駭客女王）通訊
+let commTimer = 0;
+function comm(text, dur = 3200) {
+  const c = $('comm');
+  c.querySelector('p').textContent = text;
+  c.classList.add('show');
+  clearTimeout(commTimer);
+  commTimer = setTimeout(() => c.classList.remove('show'), dur);
+}
 let flashV = 0;
 function flash(v) { flashV = Math.max(flashV, v); }
 const fmtTime = (t) => `${Math.floor(t / 60)}:${(t % 60).toFixed(1).padStart(4, '0')}`;
@@ -632,7 +664,7 @@ function setWeapon(k) {
   if (S.weapon === k) return;
   S.weapon = k;
   S.fireT = 0.05;
-  shipModel.accentMat.emissive.setHex(WEAPONS[k].color);
+  shipModel.setWeaponColor(WEAPONS[k].color);
   refreshWeaponButtons();
   sfx.ui();
 }
@@ -644,7 +676,7 @@ function findTarget(extra, maxDist, withEshots) {
   let best = null, bestZ = -Infinity;
   const test = (t, r) => { if (t.z > bestZ && aligned(t, r)) { best = t; bestZ = t.z; } };
   for (const r of rocks) test(r, r.r);
-  for (const d of drones) test(d, 0.9);
+  for (const d of drones) test(d, d.r);
   if (withEshots) for (const e of eshots) test(e, 0.7);
   if (boss && !boss.entering) test(boss, boss.r);
   return best;
@@ -727,9 +759,9 @@ function laserUpdate(dt, def, lv) {
     if (t.z < -1 && t.z > -260 && t.z > bestZ && Math.hypot(t.x - ship.x, t.y - ship.y) < r + 0.45) { best = t; bestZ = t.z; bestR = r; kind = k; idx = i; }
   };
   rocks.forEach((r, i) => test(r, r.r, 'rock', i));
-  drones.forEach((d, i) => test(d, 0.9, 'drone', i));
+  drones.forEach((d, i) => test(d, d.r, 'drone', i));
   eshots.forEach((e, i) => test(e, 0.7, 'eshot', i));
-  if (boss && !boss.entering) test(boss, boss.shieldUp ? 7 : boss.r, 'boss', -1);
+  if (boss && !boss.entering) test(boss, boss.shieldUp ? boss.shieldR : boss.r, 'boss', -1);
 
   const z1 = best ? best.z + bestR * 0.6 : -260;
   const dmg = def.dps[lv] * dt * (S.warp > 0 ? 1.5 : 1);
@@ -818,6 +850,9 @@ function spawning(dt, speed) {
   }
   if (S.pickupAcc > 480) { S.pickupAcc = 0; spawnPickup(Math.random() < 0.72 ? 'boost' : 'repair'); }
   if (S.ringAcc > 650) { S.ringAcc = rand(-150, 0); spawnRing(); }
+  S.enemyAcc = (S.enemyAcc || 0) + speed * dt;
+  const egap = Math.max(300, 620 - S.wave * 70 - S.round * 40);
+  if (S.enemyAcc > egap && prog > 0.08 && prog < 0.88 && drones.length < 9) { S.enemyAcc = 0; spawnFormation(); }
 }
 
 /* ================= 傷害與擊破 ================= */
@@ -850,12 +885,35 @@ function destroyRock(i, byPlayer) {
 function damageDrone(i, dmg) {
   const d = drones[i];
   d.hp -= dmg;
+  d.flash = 0.1;
   if (d.hp <= 0) {
-    spawnExplosion(d.x, d.y, d.z, 0x7dff9a, 0.6, true);
+    spawnExplosion(d.x, d.y, d.z, 0xff4a3a, 0.75, d.mode === 'orbit');
     sfx.boom(false);
-    addScore(150); S.credits += 15; S.kills++; S.roundKills++;
+    addScore(200); S.credits += 12; S.kills++; S.roundKills++;
     removeAt(drones, i);
   }
+}
+// 敵機：從蟲洞深處成隊飛入 → 在前方盤旋射擊 → 時間到就俯衝穿過
+function spawnDrone(o) {
+  const m = makeDroneModel();
+  const d = Object.assign({ mesh: m.g, model: m, r: 1.35, hp: 3 + S.round, fireT: rand(1.2, 2.6), t: 0, flash: 0, spin: rand(-1.5, 1.5), off: rand(0, TAU) }, o);
+  place(d);
+  drones.push(d);
+  return d;
+}
+function spawnFormation() {
+  const n = Math.min(6, 2 + S.wave + Math.floor((S.round - 1) / 2));
+  const shape = pick(['line', 'v', 'arc']);
+  const cy = rand(1, 4.5), hoverZ = rand(-34, -24);
+  for (let i = 0; i < n; i++) {
+    const u = n === 1 ? 0 : i / (n - 1) - 0.5;   // -0.5 ~ 0.5
+    let tx = u * 14, ty = cy;
+    if (shape === 'v') ty = cy + Math.abs(u) * 5;
+    if (shape === 'arc') ty = cy - (0.25 - u * u) * 8;
+    spawnDrone({ mode: 'fighter', x: tx * 0.3, y: ty * 0.3 + 4, z: SPAWN_Z - i * 6, tx, ty, hoverZ, life: rand(7, 10), state: 'in' });
+  }
+  if (!S.warnedFormation) { S.warnedFormation = true; comm('偵測到敵機編隊！它們會盤旋射擊，最後俯衝——打掉或閃開。', 3600); }
+  else toast('敵機編隊接近', 'bad', 3);
 }
 function killEshot(i) {
   const e = eshots[i];
@@ -873,6 +931,7 @@ function hurt(amount) {
   }
   S.hull -= amount;
   S.roundDmg += amount;
+  if (!S.warnedHull && S.hull > 0 && S.hull / S.hullMax < 0.3) { S.warnedHull = true; comm('船體受損嚴重！找綠色修復核心，撐住！', 3000); }
   S.invuln = 1.0;
   S.shake = 0.8;
   S.hitFlash = 1;
@@ -923,7 +982,7 @@ function startGame() {
   hideOverlays();
   showHUD(true);
   shipModel.group.visible = true;
-  shipModel.accentMat.emissive.setHex(WEAPONS.pulse.color);
+  shipModel.setWeaponColor(WEAPONS.pulse.color);
   refreshWeaponButtons();
   input.calibrated = false;
   input.offX = input.offY = 0;
@@ -941,6 +1000,11 @@ function startWave() {
   S.waveLen = 1500 + 250 * (S.round - 1) + 150 * (S.wave - 1);
   banner(`ROUND ${S.round} · WAVE ${S.wave}/${WAVES_PER_ROUND}`, S.wave === 1 && S.round === 1 ? '傾斜手機閃避隕石，武器會自動開火' : '');
   if (S.overdrive) { S.overdrive = false; triggerWarp(3); }
+  S.warnedFormation = false;
+  S.warnedHull = false;
+  if (S.wave === 1 && S.round === 1) comm('指揮官，蟲洞已穩定。傾斜機身閃避，武器我幫你自動開火。', 4200);
+  else if (S.wave === 1) comm(`第 ${S.round} 輪，蟲洞更不穩了……跟緊我的訊號。`);
+  else comm(pick(['下一段航道，隕石密度上升。', '前方有大量訊號，準備交戰。', '保持速度，金色光環能讓你瞬間加速。']));
 }
 function endWave() {
   if (S.wave < WAVES_PER_ROUND) {
@@ -948,6 +1012,7 @@ function endWave() {
     const type = (S.wave + S.round) % 2 === 0 ? 'choice' : 'hack';
     spawnGate(type);
     banner('前方：資料閘門', type === 'choice' ? '穿過閘門選擇強化' : '穿過閘門進行破解');
+    comm(type === 'choice' ? '閘門裡有補給，挑一個你需要的。' : '閘門有加密節點，交給我……不，交給你的手指。');
   } else startBoss();
 }
 
@@ -1015,48 +1080,55 @@ function showChoice() {
 /* ================= BOSS ================= */
 function createBoss() {
   const g = new THREE.Group();
-  const coreMat = new THREE.MeshPhysicalMaterial({ color: 0x1a1a26, metalness: 0.9, roughness: 0.2, clearcoat: 1, emissive: 0xff3355, emissiveIntensity: 0.8, flatShading: true });
-  const core = new THREE.Mesh(new THREE.IcosahedronGeometry(3, 0), coreMat);
-  g.add(core);
-  const armorMat = new THREE.MeshPhysicalMaterial({ color: 0xb4bccf, metalness: 0.95, roughness: 0.28, clearcoat: 0.8, clearcoatRoughness: 0.15, flatShading: true });
-  const ringA = new THREE.Mesh(new THREE.TorusGeometry(4.6, 0.5, 6, 20), armorMat);
-  const ringB = new THREE.Mesh(new THREE.TorusGeometry(5.6, 0.22, 4, 36), armorMat);
-  ringB.rotation.x = Math.PI / 2;
-  for (let i = 0; i < 6; i++) {
-    const sp = new THREE.Mesh(new THREE.ConeGeometry(0.5, 2.2, 5), armorMat);
-    const a = (i / 6) * TAU;
-    sp.position.set(Math.cos(a) * 5.3, Math.sin(a) * 5.3, 0);
-    sp.rotation.z = a - Math.PI / 2;
-    ringA.add(sp);
-  }
+  const sprite = artSprite(ART.boss, BOSS_W, 765, 465);
+  g.add(sprite);
+  const at = sprite.userData.at;
+  // 核心：多層光暈，依狀態變色
+  const coreGlow = glowSprite(0xff2a2a, 7, 2.2);
+  const coreHot = glowSprite(0xffe0d0, 2.6, 3.5);
+  coreGlow.position.copy(at(765, 462, 0.3));
+  coreHot.position.copy(at(765, 462, 0.35));
+  g.add(coreGlow, coreHot);
+  // 兩道會轉動的能量環（設定圖上的同心圓）
+  const ringMat = additive(0xff3a3a, 0.9, { side: THREE.DoubleSide }, 3);
+  const ringA = new THREE.Mesh(new THREE.RingGeometry(3.55 * BK, 3.72 * BK, 96, 1, 0, TAU * 0.82), ringMat);
+  const ringB = new THREE.Mesh(new THREE.RingGeometry(5.45 * BK, 5.62 * BK, 128, 1, 0, TAU * 0.9), ringMat);
+  ringA.position.copy(at(765, 462, 0.25)); ringB.position.copy(ringA.position);
   g.add(ringA, ringB);
-  const eyeMat = new THREE.MeshBasicMaterial({ color: hdr(0xff3355, 3) });
-  const eye = new THREE.Mesh(new THREE.SphereGeometry(1.1, 16, 12), eyeMat);
-  eye.position.z = 2.6;
-  g.add(eye);
-  const eyeGlow = glowSprite(0xff3355, 6, 3);
-  eyeGlow.position.z = 3;
-  g.add(eyeGlow);
-  const shieldMat = additive(0x66ddff, 0.3, { wireframe: true }, 1.6);
-  const shield = new THREE.Mesh(new THREE.IcosahedronGeometry(7, 2), shieldMat);
+  // 塔頂閃爍的紅燈
+  const beacons = [[765, 92], [1205, 268], [330, 350], [1240, 640], [470, 760], [1000, 160], [520, 160], [905, 840]].map(([px, py], i) => {
+    const s = glowSprite(0xff3030, 1.3, 3);
+    s.position.copy(at(px, py, 0.2));
+    s.userData.phase = i * 0.7;
+    g.add(s);
+    return s;
+  });
+  const shieldMat = additive(0x66ddff, 0.08, { wireframe: true }, 1.2);
+  const shield = new THREE.Mesh(new THREE.IcosahedronGeometry(BOSS_SHIELD_R, 2), shieldMat);
   const shellMat = shieldMaterial(0x3aa8ff);
-  const shell = new THREE.Mesh(new THREE.IcosahedronGeometry(6.9, 3), shellMat);
+  const shell = new THREE.Mesh(new THREE.IcosahedronGeometry(BOSS_SHIELD_R - 0.1, 3), shellMat);
+  shield.position.copy(ringA.position); shell.position.copy(ringA.position);
   g.add(shield, shell);
   scene.add(g);
   const hpMax = 420 * (1 + 0.4 * (S.round - 1));
   return {
-    mesh: g, core, coreMat, ringA, ringB, eyeMat, eyeGlow, shield, shieldMat, shell, shellMat,
-    x: 0, y: 0, z: -380, r: 4.3, hp: hpMax, hpMax, shieldUp: true, shieldScale: 1,
-    state: null, lastState: null, stateT: 0, fireT: 2.5, pattern: 0, mx: 0, t: 0,
+    mesh: g, sprite, coreGlow, coreHot, ringA, ringB, ringMat, beacons, shield, shieldMat, shell, shellMat,
+    x: 0, y: 0, z: -380, r: BOSS_R, shieldR: BOSS_SHIELD_R, hp: hpMax, hpMax, shieldUp: true, shieldScale: 1,
+    state: null, lastState: null, stateT: 0, fireT: 2.5, pattern: 0, mx: 0, t: 0, rot: 0,
     entering: true, hackCd: 0, flash: 0, shieldFlash: 0,
   };
+}
+function setBossColor(b, hex) {
+  b.coreGlow.material.color.setHex(hex).multiplyScalar(2.6);
+  b.ringMat.color.setHex(hex).multiplyScalar(3);
 }
 function startBoss() {
   S.phase = 'bossIntro';
   boss = createBoss();
   place(boss);
   $('bossbar').classList.remove('hidden');
-  banner('⚠ WARNING ⚠', '巨型守衛接近 — 先破解護盾，再用弱點武器攻擊', true, 3000);
+  banner('⚠ WARNING ⚠', '母艦 NEMESIS 接近', true, 3000);
+  comm('是母艦 NEMESIS……它的護盾我得先駭進去。準備好就按 HACK！', 4500);
   sfx.warn();
 }
 function dropShield(bonus) {
@@ -1066,17 +1138,12 @@ function dropShield(bonus) {
   b.state = b.lastState = pick(keys);
   b.stateT = 10 + bonus * 2;
   const st = BOSS_STATES[b.state];
-  b.coreMat.emissive.setHex(st.color);
-  b.eyeMat.color.setHex(st.color).multiplyScalar(3);
-  b.eyeGlow.material.color.setHex(st.color).multiplyScalar(3);
-  banner(`護盾破除 · ${st.label}`, `${st.hint}（弱點：${WEAPONS[st.weak].zh} ${WEAPONS[st.weak].name}）`, false, 3000);
+  setBossColor(b, st.color);
+  banner(`護盾破除 · ${st.label}`, `弱點：${WEAPONS[st.weak].zh} ${WEAPONS[st.weak].name}`, false, 2600);
+  comm(`護盾破了！它切換成「${st.label}」——${st.hint}。`, 4000);
   flash(0.5);
   if (b.state === 'SWARM') {
-    for (let i = 0; i < 6; i++) {
-      const mesh = new THREE.Mesh(droneGeo, droneMat);
-      scene.add(mesh);
-      drones.push({ mesh, a: (i / 6) * TAU, x: b.x, y: b.y, z: b.z + 5, hp: 3, fireT: rand(1, 3) });
-    }
+    for (let i = 0; i < 6; i++) spawnDrone({ mode: 'orbit', a: (i / 6) * TAU, x: b.x, y: b.y, z: b.z + 6, hp: 3 + S.round });
   }
   refreshWeaponButtons();
 }
@@ -1084,11 +1151,10 @@ function raiseShield() {
   const b = boss;
   b.shieldUp = true;
   b.state = null;
-  b.coreMat.emissive.setHex(0xff3355);
-  b.eyeMat.color.setHex(0xff3355).multiplyScalar(3);
-  b.eyeGlow.material.color.setHex(0xff3355).multiplyScalar(3);
-  while (drones.length) removeAt(drones, drones.length - 1);
+  setBossColor(b, 0xff2a2a);
+  for (let i = drones.length - 1; i >= 0; i--) if (drones[i].mode === 'orbit') removeAt(drones, i);
   banner('護盾重新展開', '再次破解！');
+  comm('護盾又張開了，再駭一次！', 2600);
   sfx.shield();
   refreshWeaponButtons();
 }
@@ -1108,6 +1174,7 @@ function startBossHack() {
         sfx.fail();
         boss.hackCd = 2.5;
         toast('破解失敗！護盾反擊', 'bad');
+        comm('嘖，被反追蹤了……再試一次。', 2600);
         hurt(8);
       }
     },
@@ -1136,7 +1203,8 @@ function defeatBoss() {
   while (drones.length) removeAt(drones, drones.length - 1);
   while (eshots.length) removeAt(eshots, eshots.length - 1);
   $('btnHack').classList.add('hidden');
-  banner('GUARDIAN DOWN', '守衛擊破！');
+  banner('NEMESIS DOWN', '母艦擊沉！');
+  comm('漂亮！母艦擊沉。我就知道你做得到。', 3500);
   sfx.boom(true);
   vibrate([80, 40, 120]);
 }
@@ -1175,20 +1243,27 @@ function updateBoss(dt, rawDt) {
   const fast = b.state === 'CORE';
   b.mx += dt * (fast ? 1.6 : 0.55);
   b.x = Math.sin(b.mx) * (fast ? 5.5 : 3.2);
-  b.y = Math.sin(b.mx * 1.37 + 1) * (fast ? 3.8 : 2.4);
-  b.ringA.rotation.z += dt * 0.6;
-  b.ringB.rotation.y += dt * 0.9;
-  b.core.rotation.x += dt * 0.4; b.core.rotation.y += dt * 0.3;
+  b.y = BOSS_Y + Math.sin(b.mx * 1.37 + 1) * (fast ? 2.6 : 1.4);
+  b.ringA.rotation.z += dt * 0.7;
+  b.ringB.rotation.z -= dt * 0.45;
+  b.rot = S.phase === 'bossDown' ? b.rot + rawDt * 0.8 : Math.sin(b.t * 0.4) * 0.06;
+  b.mesh.rotation.z = b.rot;
+  b.sprite.material.rotation = b.rot;
+  const pulse = 1 + Math.sin(b.t * 5) * 0.12;
+  b.coreGlow.scale.setScalar(7 * BK * pulse * (b.shieldUp ? 1 : 1.25));
+  b.coreHot.scale.setScalar(2.6 * BK * pulse + b.flash * 12);
+  for (const s of b.beacons) s.scale.setScalar(Math.sin(S.time * 4 + s.userData.phase) > 0.3 ? 1.3 : 0.4);
   b.shieldScale = lerp(b.shieldScale, b.shieldUp ? 1 : 0.01, damp(6, rawDt));
   b.shield.scale.setScalar(b.shieldScale);
   b.shell.scale.setScalar(b.shieldScale);
   b.shield.rotation.y += dt * 0.3;
   b.shieldFlash = Math.max(0, b.shieldFlash - rawDt * 2);
-  b.shieldMat.opacity = 0.25 + b.shieldFlash;
+  b.shieldMat.opacity = 0.08 + b.shieldFlash * 0.6;
   b.shellMat.uniforms.uFlash.value = b.shieldFlash;
   b.shellMat.uniforms.uTime.value = S.time;
   b.flash = Math.max(0, b.flash - rawDt);
-  b.coreMat.emissiveIntensity = 1.2 + b.flash * 14;
+  b.sprite.material.color.setScalar(1 + b.flash * 6);
+  b.sprite.material.opacity = clamp((b.z + 380) / 150, 0, 1);
   b.hackCd -= rawDt;
 
   if (S.phase === 'boss') {
@@ -1201,9 +1276,8 @@ function updateBoss(dt, rawDt) {
     if (b.fireT <= 0) bossFire(b);
   }
   if (S.phase === 'bossDown') {
-    b.mesh.rotation.z += rawDt * 2;
-    if (Math.random() < rawDt * 10) {
-      spawnExplosion(b.x + rand(-4, 4), b.y + rand(-4, 4), b.z + rand(-2, 3), pick([0xff8a40, 0xff5c7c, 0xffd0a0]), 0.9, true);
+    if (Math.random() < rawDt * 12) {
+      spawnExplosion(b.x + rand(-9, 9), b.y + rand(-6, 6), b.z + rand(-2, 3), pick([0xff8a40, 0xff5c7c, 0xffd0a0]), 0.9, true);
       sfx.boom(true);
       S.shake = Math.max(S.shake, 0.4);
     }
@@ -1211,22 +1285,59 @@ function updateBoss(dt, rawDt) {
   place(b);
 }
 
-function updateDrones(dt) {
+function droneShoot(d, vz = 34) {
+  const t = -d.z / vz;
+  const mesh = new THREE.Mesh(eshotGeo, eshotMat);
+  mesh.scale.setScalar(0.7);
+  scene.add(mesh);
+  eshots.push({ mesh, x: d.x, y: d.y, z: d.z, prevZ: d.z, vx: (ship.x - d.x) / t, vy: (ship.y - d.y) / t, vz });
+}
+function updateDrones(dt, speed) {
   for (let i = drones.length - 1; i >= 0; i--) {
     const d = drones[i];
-    d.a += dt * 1.4;
-    d.x = boss.x + Math.cos(d.a) * 6.5;
-    d.y = boss.y + Math.sin(d.a) * 6.5;
-    d.z = boss.z + 5;
-    d.mesh.rotation.y += dt * 3;
-    d.fireT -= dt;
-    if (d.fireT <= 0) {
-      d.fireT = rand(1.8, 3.2);
-      const vz = 40, t = -d.z / vz;
-      const mesh = new THREE.Mesh(eshotGeo, eshotMat);
-      scene.add(mesh);
-      eshots.push({ mesh, x: d.x, y: d.y, z: d.z, prevZ: d.z, vx: (ship.x - d.x) / t, vy: (ship.y - d.y) / t, vz });
+    d.t += dt;
+    if (d.mode === 'orbit') {
+      if (!boss) { removeAt(drones, i); continue; }
+      d.a += dt * 1.1;
+      d.x = boss.x + Math.cos(d.a) * 13;
+      d.y = boss.y + Math.sin(d.a) * 7.5 - 1;
+      d.z = boss.z + 6;
+      d.fireT -= dt;
+      if (d.fireT <= 0) { d.fireT = rand(1.8, 3.2); droneShoot(d, 40); }
+    } else {
+      if (d.state === 'in') {
+        d.z = lerp(d.z, d.hoverZ, damp(1.6, dt));
+        d.x = lerp(d.x, d.tx, damp(1.8, dt)); d.y = lerp(d.y, d.ty, damp(1.8, dt));
+        if (d.z > d.hoverZ - 3) d.state = 'hover';
+      } else if (d.state === 'hover') {
+        d.x = lerp(d.x, d.tx + Math.sin(d.t * 1.3 + d.off) * 2.2, damp(3, dt));
+        d.y = lerp(d.y, d.ty + Math.cos(d.t * 1.1 + d.off) * 1.2, damp(3, dt));
+        d.fireT -= dt;
+        if (d.fireT <= 0) { d.fireT = rand(1.6, 2.8) / (1 + 0.15 * (S.round - 1)); droneShoot(d); }
+        if (d.t > d.life) { d.state = 'dive'; d.dx = ship.x; d.dy = ship.y; }
+      } else {
+        // 俯衝：朝玩家當時的位置衝過來，可以閃也可以打掉
+        d.z += (speed * 0.5 + 40) * dt;
+        d.x = lerp(d.x, d.dx, damp(1.2, dt)); d.y = lerp(d.y, d.dy, damp(1.2, dt));
+        if (d.z > -1.2 && d.z < 1.2 && S.phase !== 'dead' && Math.hypot(d.x - ship.x, d.y - ship.y) < d.r + 0.6) {
+          if (S.warp > 0 || S.dash > 0) { damageDrone(i, 999); continue; }
+          hurt(15);
+          spawnExplosion(d.x, d.y, d.z, 0xff4a3a, 0.75);
+          removeAt(drones, i);
+          continue;
+        }
+        if (d.z > 14) { removeAt(drones, i); continue; }
+      }
     }
+    // 動畫：自轉、眼睛與推進器閃爍、被打中時發白
+    const m = d.model;
+    m.g.rotation.z += d.spin * dt;
+    m.sprite.material.rotation = m.g.rotation.z;
+    d.flash = Math.max(0, d.flash - dt);
+    m.sprite.material.color.setScalar(1 + d.flash * 25);
+    m.sprite.material.opacity = clamp((d.z - SPAWN_Z) / 90, 0, 1);   // 從遠方淡入
+    m.eye.scale.setScalar(1.2 + Math.sin(S.time * 8 + d.off) * 0.25);
+    for (const j of m.jets) j.scale.setScalar(0.6 + Math.random() * 0.25);
     place(d);
   }
 }
@@ -1394,6 +1505,11 @@ function update(rawDt) {
 
   bend.set(Math.sin(S.time * 0.13) * 38, Math.sin(S.time * 0.17 + 1) * 28);
   tunnelUniforms.uTime.value = S.time;
+  // 母艦出現時，蟲洞擴張成巨大的空間（不然母艦會被隧道壁切掉）
+  const arenaT = ['bossIntro', 'boss', 'bossDown'].includes(S.phase) ? 1 : 0;
+  S.arena = lerp(S.arena || 0, arenaT, damp(0.8, rawDt));
+  tunnel.scale.set(1 + S.arena * 1.6, 1 + S.arena * 1.6, 1);
+  tunnelUniforms.uDim.value = 1 - S.arena * 0.5;
   tunnelUniforms.uTravel.value = S.travel;
   tunnelUniforms.uWarp.value = clamp((S.speedMul - 1) / 2.4, 0, 1);
   S.hitFlash = Math.max(0, S.hitFlash - rawDt * 2.5);
@@ -1406,7 +1522,8 @@ function update(rawDt) {
     s.z += speed * dt * 1.3;
     if (s.z > 15) { s.z -= 345; s.a = rand(0, TAU); }
     const b = bendAt(s.z);
-    dummy.position.set(Math.cos(s.a) * s.r + b.x, Math.sin(s.a) * s.r + b.y, s.z);
+    const sr = s.r * (1 + (S.arena || 0) * 1.6);
+    dummy.position.set(Math.cos(s.a) * sr + b.x, Math.sin(s.a) * sr + b.y, s.z);
     dummy.scale.set(1, 1, sLen);
     dummy.updateMatrix();
     streakMesh.setMatrixAt(i, dummy.matrix);
@@ -1428,9 +1545,17 @@ function update(rawDt) {
   const sm = shipModel;
   sm.group.position.set(ship.x, ship.y, ship.zOff);
   const spin = S.dash > 0 ? -S.dashDir * (1 - S.dash / 0.38) * TAU : 0;
-  sm.group.rotation.set(clamp(ship.vy * 0.03, -0.5, 0.5), clamp(-ship.vx * 0.01, -0.3, 0.3), clamp(-ship.vx * 0.045, -0.9, 0.9) + spin);
-  sm.flame.scale.set(1, 1 + (S.speedMul - 1) * 1.6 + Math.random() * 0.3, 1);
-  sm.glow.scale.setScalar(0.7 + (S.speedMul - 1) * 0.5 + Math.random() * 0.1);
+  // 圖片永遠面向鏡頭，所以只做「繞視線方向」的傾斜；翻滾閃避＝整架轉一圈
+  const roll = clamp(-ship.vx * 0.03, -0.5, 0.5) + spin;
+  sm.group.rotation.set(0, 0, roll);
+  sm.sprite.material.rotation = roll;
+  sm.sprite.scale.y = SHIP_W * ART.ship.h / ART.ship.w * (1 - clamp(Math.abs(ship.vy) * 0.004, 0, 0.15));
+  const thrust = 1 + (S.speedMul - 1) * 0.25;
+  for (const e of sm.engines) {
+    e.core.scale.setScalar((0.8 + Math.random() * 0.2) * thrust);
+    e.plume.scale.set(0.7 * thrust, (1.3 + Math.random() * 0.3) * thrust * 1.4, 1);
+  }
+  for (const g of sm.side) g.scale.setScalar(0.5 + Math.random() * 0.15 + Math.abs(ship.vx) * 0.01);
   sm.bubble.visible = S.deflect > 0 || warpOn;
   sm.bubble.rotation.y += rawDt * 2;
   if (S.phase !== 'dead' && S.phase !== 'over') sm.group.visible = S.invuln > 0 ? Math.floor(S.time * 20) % 2 === 0 : true;
@@ -1457,7 +1582,8 @@ function update(rawDt) {
   updateShots(dt, speed);
   updateEshots(dt);
   updatePickups(dt, speed);
-  if (boss) { updateBoss(dt, rawDt); updateDrones(dt); }
+  if (boss) updateBoss(dt, rawDt);
+  updateDrones(dt, speed);
   updateFx(dt, speed);
   updateTrails(dt, speed);
 
@@ -1465,17 +1591,17 @@ function update(rawDt) {
   if (S.phase === 'dead') { S.phaseT -= rawDt; if (S.phaseT <= 0) endRun(true); }
 
   // 鏡頭
-  const fovT = 72 + (S.speedMul - 1) * 13;
+  const fovT = baseFov + (S.speedMul - 1) * 13;
   camera.fov = lerp(camera.fov, fovT, damp(camera.fov < fovT ? 9 : 3, rawDt));
   camera.updateProjectionMatrix();
   S.shake = Math.max(0, S.shake - rawDt * 1.8);
   const sh = S.shake * S.shake * 0.6 + (warpOn ? 0.05 : 0);
   camera.position.set(
     lerp(camera.position.x, ship.x * 0.55, damp(6, rawDt)) + rand(-sh, sh),
-    lerp(camera.position.y, ship.y * 0.55 + 1.3, damp(6, rawDt)) + rand(-sh, sh),
+    lerp(camera.position.y, ship.y * 0.55 + 2.2, damp(6, rawDt)) + rand(-sh, sh),
     7.5 + (S.speedMul - 1) * 0.8,
   );
-  camera.lookAt(ship.x * 0.7, ship.y * 0.7, -40);
+  camera.lookAt(ship.x * 0.7, ship.y * 0.7 + 2.6, -40);   // 飛船放在畫面下方，前方留給敵人
   camera.rotateZ(clamp(-ship.vx * 0.004, -0.15, 0.15));
 
   // 畫面特效
@@ -1542,10 +1668,10 @@ function updateShots(dt, speed) {
     const zMin = s.z - 0.6, zMax = s.prevZ + speed * dt + 0.6;
     let hit = false;
     for (let j = rocks.length - 1; j >= 0 && !hit; j--) if (hitTest(s, rocks[j], rocks[j].r, zMin, zMax)) { hit = true; damageRock(j, s.dmg); }
-    for (let j = drones.length - 1; j >= 0 && !hit; j--) if (hitTest(s, drones[j], 0.9, s.z - 0.6, s.prevZ + 0.6)) { hit = true; damageDrone(j, s.dmg); }
+    for (let j = drones.length - 1; j >= 0 && !hit; j--) if (hitTest(s, drones[j], drones[j].r, s.z - 0.6, s.prevZ + speed * dt + 0.6)) { hit = true; damageDrone(j, s.dmg); }
     for (let j = eshots.length - 1; j >= 0 && !hit; j--) if (hitTest(s, eshots[j], 0.7, s.z - 0.6, s.prevZ + 2)) { hit = true; killEshot(j); }
     if (!hit && boss && !boss.entering) {
-      const rad = boss.shieldUp ? 7 : boss.r;
+      const rad = boss.shieldUp ? boss.shieldR : boss.r;
       if (hitTest(s, boss, rad, s.z - 1, s.prevZ + 1)) {
         hit = true;
         damageBoss(s.dmg, s.w);
@@ -1567,7 +1693,7 @@ function updateEshots(dt) {
       removeAt(eshots, i);
       continue;
     }
-    if (e.z > 12) { removeAt(eshots, i); continue; }
+    if (e.z > 3) { removeAt(eshots, i); continue; }   // 飛過飛船就消失，不要穿過鏡頭
     e.mesh.scale.setScalar(1 + Math.sin(S.time * 20 + i) * 0.15);
     place(e);
   }
@@ -1618,6 +1744,8 @@ function updateHUD() {
   const pips = Array.from({ length: S.boostMax }, (_, i) => `<i class="${i < S.boost ? 'on' : ''}"></i>`).join('');
   if (hudCache.pips !== pips) { hudCache.pips = pips; $('boostPips').innerHTML = pips; }
   $('btnBoost').classList.toggle('empty', S.boost <= 0);
+  $('btnBoost').style.setProperty('--p', (S.boost / S.boostMax).toFixed(3));
+  $('hud').classList.toggle('boss-mode', inBoss);
   if (boss) {
     setWidth('bosshp', boss.hp / boss.hpMax);
     setText('bossState', boss.shieldUp ? '· 護盾展開' : `· ${BOSS_STATES[boss.state].label} ${Math.ceil(boss.stateT)}s`);
@@ -1690,6 +1818,6 @@ requestAnimationFrame(loop);
 
 // 給除錯用
 window.__trs = {
-  get S() { return S; }, rocks, startBossHack, useBoost, get boss() { return boss; }, hack, shipModel, trails, post, scene, renderer,
+  get S() { return S; }, rocks, startBossHack, useBoost, get boss() { return boss; }, hack, shipModel, trails, post, scene, renderer, drones, spawnFormation, camera,
   step(sec) { for (let t = 0; t < sec; t += 1 / 60) update(1 / 60); render(); },
 };
