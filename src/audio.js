@@ -67,6 +67,9 @@ export const sfx = {
   ok() { tone(500, 1600, 0.35, 'triangle', 0.18); },
   fail() { tone(320, 70, 0.45, 'sawtooth', 0.18); },
   shield() { if (throttle('sh', 0.12)) tone(1300, 400, 0.08, 'sine', 0.06); },
+  transform() { tone(180, 520, 0.16, 'square', 0.07); setTimeout(() => tone(520, 380, 0.08, 'square', 0.06), 120); noise(0.18, 0.08, 3000, 800); },
+  lock() { if (throttle('lock', 0.05)) tone(1500, 1500, 0.05, 'square', 0.05); },
+  missile() { noise(0.6, 0.3, 2500, 300); tone(300, 900, 0.3, 'sawtooth', 0.06); },
   warn() { tone(440, 440, 0.25, 'square', 0.1); setTimeout(() => tone(440, 440, 0.25, 'square', 0.1), 350); },
 };
 

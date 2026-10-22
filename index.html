@@ -21,28 +21,41 @@
 <div id="vignette"></div>
 <div id="flash"></div>
 
-<!-- 遊戲中介面（參考示意圖的配置） -->
+<!-- 遊戲中介面：直式為主、右手單手可操作（方案 C：變形形態＋飛彈） -->
 <div id="hud" class="hidden">
-  <div class="hud-score">
-    <div class="big" id="score">0</div>
-    <div class="shard"><i>◆</i><span><small>DATA SHARD</small><b id="credits">0</b></span></div>
-    <div class="sub"><span id="time">0:00.0</span> · KILLS <b id="kills">0</b></div>
+  <div class="topbar">
+    <div class="tb-score"><b id="score">0</b><span><i>◆</i><em id="credits">0</em></span></div>
+    <div class="tb-mid">
+      <div class="tb-wave"><span id="phase">WAVE 1/3</span><div class="seg"><i id="progress"></i></div></div>
+      <div id="bossbar" class="hidden"><span class="bb-name">NEMESIS <em id="bossState"></em></span><div class="seg boss"><i id="bosshp"></i></div></div>
+    </div>
+    <button id="btnPause" aria-label="暫停">❚❚</button>
   </div>
-  <div class="hud-c"><div id="phase">WAVE 1/3</div><div class="seg"><i id="progress"></i></div></div>
-  <div id="bossbar" class="hidden"><div class="bb-name">MOTHERSHIP “NEMESIS” <span id="bossState"></span></div><div class="seg boss"><i id="bosshp"></i></div></div>
+  <div id="comm" class="comm"><div class="face"></div><p></p></div>
   <div id="banner"><div class="b1"></div><div class="b2"></div></div>
   <div id="toasts"></div>
-  <div id="comm" class="comm"><div class="face"></div><div class="said"><small>QUEEN · 駭客女王</small><p></p></div></div>
-  <div class="hud-ship">
-    <button id="btnBoost" class="fever"><span class="ring"></span><i>⚡</i><b>BOOST</b><span id="boostPips"></span></button>
-    <div class="ship-stat"><div class="ship-icon"></div><div class="bars"><div class="bar hull"><i id="hull"></i></div><div class="bar energy"><i id="energy"></i></div></div></div>
-  </div>
-  <div id="weapons"></div>
+  <div id="shipbars"><div class="hb"><i id="hull"></i></div><div class="eb"><i id="energy"></i></div></div>
+  <div id="hitdir"></div>
+  <div id="modes"></div>
   <button id="btnHack" class="hidden">⌬ HACK<small>破解護盾</small></button>
-  <div class="hud-corner"><button id="btnCal" title="重新校正陀螺儀">◎</button><button id="btnPause" title="暫停">❚❚</button></div>
+  <button id="btnBoost" class="fold" aria-label="摺疊躍遷"><i>⚡</i><b>FOLD</b><span id="boostCount">×1</span></button>
+  <button id="btnMissile" class="msl" aria-label="飛彈：按住鎖定，放開發射"><span class="ring"></span><span class="core"><b>MISSILE</b><small>按住鎖定</small><em id="missileCount">6</em></span></button>
 </div>
 
-<!-- 破解小遊戲：右側的圓形全息面板，戰鬥在背後慢動作繼續 -->
+<!-- 新手教學提示 -->
+<div id="tutTip" class="tut-tip hidden"><div class="tt-step" id="tutStep"></div><div class="tt-main" id="tutMain"></div><div class="tt-sub" id="tutSub"></div></div>
+<button id="btnSkipTut" class="skip-tut hidden">跳過教學</button>
+
+<!-- 立繪劇情 -->
+<div id="story" class="story hidden">
+  <div class="st-bg"></div>
+  <div class="st-char"></div>
+  <div class="st-top"><span>PROLOGUE · 訊號接通</span><button id="stSkip">跳過 ▸▸</button></div>
+  <div class="st-box" id="stBox"><div class="st-name">QUEEN<small>駭客女王</small></div><p id="stText"></p><span class="st-next">▼</span></div>
+  <div class="st-choices" id="stChoices"></div>
+</div>
+
+<!-- 破解小遊戲 -->
 <div id="hack" class="overlay hack hidden">
   <div class="hack-panel">
     <div class="hack-head"><div class="face"></div><div><div class="hack-title"></div><div class="hack-info"></div></div></div>
@@ -63,22 +76,22 @@
 <!-- 標題 -->
 <div id="title" class="overlay">
   <div class="panel title-panel">
-    <div class="title-art"></div>
     <h1 class="logo">TRS<span>RUSH</span></h1>
     <p class="tag">WORMHOLE RUNNER · 蟲洞跑酷射擊</p>
     <label class="field">機師代號 <input id="pilot" maxlength="12" placeholder="PILOT" autocomplete="off"></label>
     <div class="opts">
-      <label>陀螺儀靈敏度
+      <label>陀螺儀
         <select id="sens"><option value="0">低</option><option value="1" selected>中</option><option value="2">高</option></select>
       </label>
       <label>畫質
         <select id="quality"><option value="0">低（省電）</option><option value="1">中</option><option value="2">高</option></select>
       </label>
       <label class="chk"><input type="checkbox" id="invert"> 上下反轉</label>
+      <label class="chk"><input type="checkbox" id="lefty"> 左手模式</label>
     </div>
     <button id="btnStart" class="btn primary">啟動引擎</button>
-    <button id="btnBoard" class="btn">排行榜</button>
-    <p class="help">手機：橫向持握，傾斜機身操控 · 手指拖曳微調 · 快速左右滑動＝翻滾閃避<br>電腦：滑鼠／WASD 移動 · 1–4 換武器 · 空白鍵 加速 · H 破解 · Q/E 翻滾 · Esc 暫停</p>
+    <div class="btn-row"><button id="btnTutorial" class="btn">重玩教學</button><button id="btnBoard" class="btn">排行榜</button></div>
+    <p class="help">手機：直拿，傾斜機身移動 · 手指拖曳微調 · 快速左右滑＝翻滾閃避<br>電腦：滑鼠／WASD 移動 · 1–3 變形 · 按住 F 鎖定飛彈 · 空白鍵 躍遷 · H 破解 · Esc 暫停</p>
   </div>
 </div>
 
